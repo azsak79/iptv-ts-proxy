@@ -1,170 +1,357 @@
 # iptv-ts-proxy
 
-HLS (m3u8) IPTV-adásokból **folyamatos MPEG-TS** folyamot készít, amit bármely lejátszó vagy
-PVR (NextPVR, Jellyfin, Kodi, VLC, TVHeadend, Plex-tuner bridge-ek) egyszerű „HTTP TS” forrásként
-kezel. Mellé ad csatornakatalógust, forrás-ellenőrzést automatikus legjobbforrás-választással,
-lejátszás közbeni átváltást (failover), szűrt XMLTV EPG-t és webes admin felületet.
+**HLS → folyamatos MPEG-TS IPTV proxy** csatornakatalógussal, automatikus forrás-ellenőrzéssel,
+lejátszás közbeni átváltással, szűrt EPG-vel és webes admin felülettel. Linuxra, systemd
+szolgáltatásként, telepítő varázslóval.
 
-**Miért jó:** sok szolgáltató kapcsolatonként korlátozza a letöltési sebességet. A proxy a
-szegmenseket párhuzamos Range-részekben tölti, így akadás nélkül megy a stream ott is, ahol a
-lejátszó közvetlenül akadna. Csatornánként egyetlen upstream letöltés megy, akárhány néző van.
+> Csak olyan adást használj vele, amihez jogod van. A program nem tartalmaz csatornalistát és
+> nem kerüli meg a szolgáltatói védelmet (DRM, titkosítás).
 
-> Csak olyan adást használj vele, amihez jogod van. A program nem tartalmaz csatornalistát.
+- **Telepítés lépésről lépésre:** [`docs/TELEPITES.md`](docs/TELEPITES.md)
+- **Gyors telepítés:** `sudo ./install.sh` a kicsomagolt mappában (részletek lent)
+- **Változások:** [`CHANGELOG.md`](CHANGELOG.md)
 
-## Követelmények
-- Linux **systemd**-del (Debian 11+, Ubuntu 22.04+, Fedora, RHEL/Alma/Rocky 9+, openSUSE, Arch)
-- **Python ≥ 3.9** `venv` modullal, és CA-tanúsítványok (`ca-certificates`) a HTTPS-es forrásokhoz
-- internet a telepítéskor (`pip install aiohttp`)
+---
 
-Friss, minimál rendszeren a hiányzó csomagokat a telepítő a disztró csomagkezelőjével felteszi
-(jóváhagyás után; `--unattended`/`--yes` esetén kérdés nélkül):
+## Tartalom
+1. [Mire jó](#1-mire-jó)
+2. [Funkciók](#2-funkciók)
+3. [Gyors telepítés](#3-gyors-telepítés)
+4. [Hogyan működik](#4-hogyan-működik)
+5. [Végpontok](#5-végpontok)
+6. [Admin felület](#6-admin-felület)
+7. [Beállítások](#7-beállítások)
+8. [Katalógus](#8-katalógus)
+9. [Forrás-ellenőrzés és átváltás](#9-forrás-ellenőrzés-és-átváltás)
+10. [EPG és logók](#10-epg-és-logók)
+11. [Értesítés (webhook)](#11-értesítés-webhook)
+12. [JSON API](#12-json-api)
+13. [Biztonság](#13-biztonság)
+14. [Fájlok és mentés](#14-fájlok-és-mentés)
+15. [Korlátok](#15-korlátok)
+16. [Fejlesztés és teszt](#16-fejlesztés-és-teszt)
 
-| Csomagkezelő | Csomagok |
-|---|---|
-| apt (Debian, Ubuntu) | `python3 python3-venv ca-certificates` |
-| dnf / yum (Fedora, RHEL, Alma, Rocky) | `python3 ca-certificates` |
-| zypper (openSUSE) | `python3 ca-certificates` |
-| pacman (Arch) | `python ca-certificates` |
+---
 
-Csak azt telepíti, ami hiányzik. Az `aiohttp` a programhoz tartozó venv-be kerül, a rendszer
-Pythonját nem módosítja.
+## 1. Mire jó
+Sok IPTV-szolgáltató HLS-ben (m3u8 + rövid `.ts` szegmensek) ad, és **kapcsolatonként korlátozza a
+letöltési sebességet**. A lejátszó egyetlen kapcsolaton tölt, ezért a stream akad, lassan indul,
+a PVR-szoftverek (NextPVR, TVHeadend) pedig gyakran eldobják.
 
-Interaktív futásnál a grafikus varázslóhoz a `whiptail`-t is felteszi, ha hiányzik (apt: `whiptail`,
-dnf/yum/zypper: `newt`, pacman: `libnewt`). Ha ez nem sikerül, szöveges módban folytatja.
-`--unattended`, `IPTV_UI=plain` és `--no-deps` esetén nem telepíti.
-Ha a rendszer Pythonja régebbi 3.9-nél (pl. RHEL 8: 3.6), előbb telepíts újabbat (`dnf install python3.11`), a telepítő megtalálja.
-- root jog a telepítéshez (a szolgáltatás saját, jogosultság nélküli felhasználóval fut)
+Az iptv-ts-proxy a szolgáltató és a lejátszó közé áll:
+- a szegmenseket **párhuzamos Range-részekben** tölti, így a kapcsolatonkénti korlát nem számít;
+- a lejátszó **egyetlen, folyamatos MPEG-TS** folyamot kap (`/ch/<id>.ts`), amit minden PVR és
+  lejátszó „HTTP TS” forrásként kezel;
+- csatornánként **egy upstream letöltés** megy, akárhány néző van;
+- a csatornák forrásait karbantartja: méri, a legjobbat választja, kiesésnél átvált.
 
-## Telepítés
+```
+szolgáltató (HLS)  ──►  iptv-ts-proxy  ──►  /ch/<id>.ts     ──►  NextPVR / Jellyfin / Kodi / VLC / TVHeadend
+                         │                  /playlist.m3u
+                         │                  /epg.xml.gz
+                         └─ admin: /admin (katalógus, ellenőrzés, statisztika, beállítások)
+```
+
+## 2. Funkciók
+- **HLS → TS proxy:** on-demand indulás, több néző egy letöltésből (fan-out), gyűrűpuffer,
+  párhuzamos szegmens- és Range-letöltés, master playlistnél a legjobb minőség.
+- **Csatornakatalógus:** M3U-importtal indul, a webes felületen szerkeszthető. Csatornánként
+  több forrás-URL, csoportok, csatornaszám, logó, engedélyezés, rögzített forrás. Export JSON-ba
+  és M3U-ba, visszaállítható mentések. Stabil csatorna-URL: szerkesztéskor sem változik.
+- **Forrás-ellenőrzés:** napi automatikus mérés (a szegmensletöltés sebessége a szegmenshosszhoz
+  képest). A legjobb forrás kerül előre, hiszterézissel a pattogás ellen.
+- **Élő átváltás (failover):** hiba vagy megakadás esetén lejátszás közben másik forrásra vált,
+  a kliens kapcsolata nem szakad meg.
+- **EPG:** XMLTV forrás (`.xml` / `.xml.gz`), a katalógus csatornáira szűrve. „Most / következő”
+  műsor az admin felületen.
+- **Admin felület:** műszerfal (élő nézők, sebesség), katalógus-szerkesztő, ellenőrzés, események,
+  nézettségi statisztika, beállítások, napló. Jelszóval védett.
+- **Külső elérés:** titkos tokenes `/tv/<token>/…` útvonal reverse proxy vagy tunnel mögé.
+- **Értesítés:** webhook (JSON POST) kiesésről, visszatérésről, átváltásról, pl. Home Assistantnak.
+- **Telepítő varázsló:** függőségek telepítése, saját szolgáltatásfelhasználó, sandboxolt systemd
+  unit, frissítés automatikus visszaállítással, eltávolítás.
+
+## 3. Gyors telepítés
+Követelmény: Linux **systemd**-del, **Python ≥ 3.9**, internet a telepítéskor. A hiányzó
+csomagokat (`python3`, `python3-venv`, `ca-certificates`, `whiptail`) a telepítő felteszi.
+
 ```bash
-tar xzf iptv-ts-proxy-2.1.0.tar.gz
-cd iptv-ts-proxy-2.1.0
+git clone git@github.com:azsak79/iptv-ts-proxy.git
+cd iptv-ts-proxy
 sudo ./install.sh
 ```
-A varázsló sorban megkérdezi: **port** (alap 8095), elérhető legyen-e a **helyi hálózatról**,
-**admin jelszó** (üresen hagyva generál egyet), **induló M3U lista** URL-je, **EPG (XMLTV)** URL,
-**logókönyvtár**, és kell-e **külső, tokenes elérés**. A végén elindítja a szolgáltatást,
-ellenőrzi, hogy válaszol-e, és kiírja a címeket.
+A varázsló után megnyitható az admin felület: `http://<gép-IP>:8095/admin`. A lejátszóba a
+`http://<gép-IP>:8095/playlist.m3u` listát és az `http://<gép-IP>:8095/epg.xml.gz` EPG-t kell
+megadni.
 
-A varázsló grafikus (whiptail) felületen fut; a hiányzó `whiptail`-t a telepítő felteszi.
-A szöveges mód kikényszeríthető: `sudo IPTV_UI=plain ./install.sh`.
+Részletes útmutató (kérdések nélküli telepítés, lejátszók, reverse proxy, frissítés, mentés,
+hibaelhárítás): **[`docs/TELEPITES.md`](docs/TELEPITES.md)**.
 
-### Telepítés kérdések nélkül (automatizáláshoz)
+Kezelés:
 ```bash
-sudo TSP_PORT=8095 TSP_LISTEN=0.0.0.0 \
-     TSP_SOURCE='https://szolgaltato.example/lista.m3u' \
-     TSP_EPG='https://szolgaltato.example/epg.xml.gz' \
-     IPTV_EXTERNAL=1 \
-     ./install.sh --unattended
+sudo /opt/iptv-ts-proxy/install.sh status|reconfigure|uninstall [--purge]
+sudo ./install.sh update        # az új verzió mappájából
+journalctl -u iptv-ts-proxy -f
 ```
+
+## 4. Hogyan működik
+**Lejátszás.** Ha egy kliens lekéri a `/ch/<id>.ts` címet, a proxy elindítja a csatorna
+munkamenetét: a playlistet a szegmenshossz felénként olvassa, a szegmenseket `threads` (3)
+párhuzamos feladat tölti. Mindegyik `range_chunk` (512 KB) méretű részekben megy, `range_conc` (8)
+párhuzamos Range-kéréssel, és a régebbi szegmens részei elsőbbséget kapnak. A szegmenseket
+sorrendben, folyamatosan adja ki. Indulás `start_back` (2) szegmenssel az élő adás mögött;
+a memóriában `keep` (6) szegmens marad. Néző nélkül `idle` (20) mp után a csatorna leáll.
+
+**Hibatűrés.** A 404-es szegmenst 3-szor próbálja újra. Ha a szolgáltató a részletek letöltése
+közben eltünteti a szegmenst, a hiányzó részt egyetlen, Range nélküli kéréssel pótolja. A lemaradt
+kliens a legfrissebb szegmensre ugrik. A klienseknek a proxy saját, folyamatos szegmens-sorszámot
+ad, ezért egy forrásváltás nem töri meg a folyamot.
+
+**Range nélküli szolgáltató.** Ha a szolgáltató nem támogatja a Range-kérést, a teljes szegmenst
+tölti le, így a párhuzamosság szegmensszintű marad.
+
+## 5. Végpontok
+| Útvonal | Mit ad | Védelem |
+|---|---|---|
+| `/playlist.m3u`, `/playlist.m3u8` | M3U a proxy `/ch/<id>.ts` címeivel. Alapból csak az elérhető csatornák. `?all=1`: mind; `?group=Sport,Film`: csoportszűrés | nincs |
+| `/epg.xml`, `/epg.xml.gz` | a katalógus csatornáira szűrt XMLTV | nincs |
+| `/ch/<id>.ts` | egy csatorna élő adása (`video/MP2T`) | nincs |
+| `/logo/<id>.png` | csatornalogó a logókönyvtárból | nincs |
+| `/health` | `ok` (monitorozáshoz) | nincs |
+| `/status` | JSON: csatornák száma, aktív adások, EPG kora | nincs |
+| `/tv/<token>/playlist.m3u` | külső playlist (a stream-URL-ek is `/tv/<token>/ch/…`) | token |
+| `/tv/<token>/epg.xml[.gz]`, `/tv/<token>/ch/<id>.ts`, `/tv/<token>/logo/<id>.png` | külső változatok | token |
+| `/`, `/admin` | admin felület | jelszó |
+| `/api/…` | JSON API (12. fejezet) | jelszó |
+
+A playlist `#EXTINF` sorai: `tvg-id`, `tvg-name`, `tvg-logo`, `tvg-chno`, `group-title`, a fejlécben
+`url-tvg` és `x-tvg-url` az EPG címével. Rossz vagy hiányzó tokennél a `/tv/` útvonal 404-et ad.
+
+## 6. Admin felület
+Cím: `http://<gép>:8095/admin`. Basic auth: a felhasználónév bármi lehet, a jelszó a
+telepítéskor megadott vagy generált érték (`TSP_ADMIN_PASSWORD`).
+
+| Fül | Tartalom |
+|---|---|
+| **Műszerfal** | aktív adások: nézők (IP, kliens), aktuális forrás, bejövő sebesség és 2 perces grafikon, letöltött MB, hibák. **Leállít** / **kirúg**; forrásállapot-összesítő, EPG kora |
+| **Csatornák** | keresés, csoport- és állapotszűrő; állapot, aktív forrás, most futó műsor, nézők. **Szerkeszt** (adatok és forráslista: átrendezés, címke, tiltás, rögzítés, **Mérés most**), **Teszt** (8 mp-es próbaletöltés: első bájt, Mbps, TS-szinkron, megakadások), **VLC** (egycsatornás M3U), URL másolása; tömeges műveletek, **+ Új csatorna**, **Import M3U**, **Export**, **Mentések**, **Újraszámozás** |
+| **Ellenőrzés** | **Teljes mérés most** / **Gyors ellenőrzés**, folyamatjelző, a következő automatikus futás, a problémás csatornák listája |
+| **Események** | kiesés, visszatérés, forrásváltás, átváltás, ellenőrzés vége; típusszűrővel |
+| **Statisztika** | 1/7/30/90 nap: nézési idő és forgalom csatornánként, kliens-IP-nként, naponta |
+| **Beállítások** | az összes futásidejű beállítás típusos mezőkkel, „módosítva” jelölés, „alap” gomb |
+| **Napló** | az utolsó 800 naplósor, szint szerinti szűrés, követés |
+
+## 7. Beállítások
+Két forrásból jönnek: az **env fájlból** (`/etc/iptv-ts-proxy/iptv-ts-proxy.env`, `TSP_<NÉV>` alakban)
+és az admin felületen mentett **`settings.json`**-ból, ami felülírja az env fájlt. A futásidejű
+beállítások az admin felületen azonnal érvényesek, újraindítás nem kell.
+
+**Csak az env fájlban** (módosítás után `sudo systemctl restart iptv-ts-proxy`, vagy
+`sudo /opt/iptv-ts-proxy/install.sh reconfigure`):
+
 | Változó | Jelentés | Alap |
 |---|---|---|
 | `TSP_PORT` | HTTP port | `8095` |
-| `TSP_LISTEN` | figyelési cím (`0.0.0.0` = LAN, `127.0.0.1` = csak helyi) | `0.0.0.0` |
-| `TSP_ADMIN_PASSWORD` | admin jelszó (min. 8 karakter) | generált |
-| `TSP_SOURCE` | induló M3U lista (csak akkor használja, ha még nincs katalógus) | – |
-| `TSP_EPG` | XMLTV forrás (`.xml` vagy `.xml.gz`) | – |
-| `TSP_LOGOS_DIR` | logókönyvtár (`<csatornanév>.png`), abszolút útvonal, nem `/home` alatt | – |
-| `IPTV_EXTERNAL=1` | külső elérés: titkos token generálása | ki |
-| `TSP_EXTERNAL_BASE` | külső URL-előtag, pl. `https://tv.example.com/tv` | a kérés címe + `/tv` |
-| `TSP_PUBLIC` | belső playlist URL-előtagja | a kérés címe |
+| `TSP_LISTEN` | figyelési cím | `0.0.0.0` |
+| `TSP_DATA` | adatkönyvtár | `/var/lib/iptv-ts-proxy` |
+| `TSP_ADMIN_PASSWORD` | admin jelszó (üresen: nyitott admin, figyelmeztetéssel) | telepítéskor generált |
+| `TSP_EXTERNAL_TOKEN` | külső elérés tokenje (üresen: a `/tv/` útvonal kikapcsolva) | – |
+| `TSP_SOURCE` | induló M3U: csak akkor használja, ha még nincs katalógus | – |
+| `TSP_CATALOG` | a katalógusfájl egyedi útvonala | `<data>/katalog.json` |
 
-Az értékekben nem lehet szóköz és `' " \ $ `` ` karakter (ezek az env fájlban bizonytalanul viselkednek).
+**Futásidejű** (admin → Beállítások; env-ben `TSP_<NÉV nagybetűvel>`, pl. `TSP_EPG_REFRESH`):
 
-## Kezelés
-```bash
-sudo /opt/iptv-ts-proxy/install.sh status        # verzió, port, systemd állapot
-sudo /opt/iptv-ts-proxy/install.sh reconfigure   # a varázsló újra, a meglévő értékekkel
-sudo ./install.sh update                          # az ÚJ csomag mappájából: frissítés
-sudo /opt/iptv-ts-proxy/install.sh uninstall     # eltávolítás, a beállítások és adatok maradnak
-sudo /opt/iptv-ts-proxy/install.sh uninstall --purge   # mindent töröl (katalógus is!)
-journalctl -u iptv-ts-proxy -f                    # napló
-```
-- **Frissítés:** a beállítások és a katalógus megmaradnak. Az előző programverzió a
-  `/opt/iptv-ts-proxy/backup-<idő>/` mappába kerül (az utolsó 3 marad). Ha az új verzió nem
-  indul el 30 mp alatt, a telepítő automatikusan visszaállítja az előzőt.
-- Az `install.sh` újrafuttatása egy már telepített gépen frissítésként viselkedik, nem kérdez újra.
-
-## Címek
-| Cím | Mi | Védelem |
+| Név | Alap | Jelentés |
 |---|---|---|
-| `http://<gép>:8095/admin` | admin felület (katalógus, ellenőrzés, statisztika, beállítások, napló) | jelszó (Basic auth, felhasználónév bármi) |
-| `http://<gép>:8095/playlist.m3u` | M3U lista az élő csatornákkal (`?all=1`: mind, `?group=Sport,Film`: szűrés) | nincs |
-| `http://<gép>:8095/epg.xml.gz` | a katalógusra szűrt EPG | nincs |
-| `http://<gép>:8095/ch/<id>.ts` | egy csatorna élő adása | nincs |
-| `http://<gép>:8095/tv/<token>/playlist.m3u` | külső változat (ha be van kapcsolva) | titkos token |
+| *Hálózat és külső elérés* | | |
+| `external_base` | üres | külső URL-előtag token nélkül, pl. `https://tv.example.com/tv`; üresen a kérés címe + `/tv` |
+| `external_streams` | be | külső playlist: az adás a proxyn át (be) vagy közvetlenül a szolgáltatótól (ki) |
+| `public` | üres | a belső playlist URL-előtagja; üresen a kérés címe |
+| `max_sessions` | 0 | egyszerre aktív csatornák korlátja (0 = nincs); felette 503 |
+| *EPG és logók* | | |
+| `epg_source` (`TSP_EPG`) | üres | XMLTV forrás URL |
+| `legacy_epg_url` | üres | tartalék EPG-cím, ha az `epg_source` üres; az exportált M3U fejlécébe is ez kerül |
+| `epg_refresh` | 3600 | EPG újraolvasás (mp) |
+| `logos_dir` | üres | logókönyvtár (`<csatornanév>.png`) |
+| *Letöltés és lejátszás* | | |
+| `threads` | 3 | párhuzamos szegmensek csatornánként |
+| `range_conc` | 8 | párhuzamos Range-kérések csatornánként |
+| `range_chunk` | 524288 | Range-rész mérete bájtban (0 = kikapcsolva) |
+| `start_back` | 2 | ennyi szegmenssel az élő adás mögött indul |
+| `keep` | 6 | memóriában tartott szegmensek (≥ `start_back` + 1) |
+| `idle` | 20 | néző nélkül ennyi mp után leáll a csatorna |
+| *Katalógus és kimenet* | | |
+| `playlist_only_alive` | be | a playlistben csak az elérhető csatornák |
+| `ip_only` | ki | csak IP-címes forrás-URL használható (egyes szolgáltatóknál a domaines URL lassabb) |
+| `write_legacy_files` | ki | régi pipeline-kompatibilis fájlok írása (csak `TSP_PIPELINE_DIR` mellett) |
+| `history_keep` | 60 | katalógus-mentések száma |
+| *Forrás-ellenőrzés* | | |
+| `check_enabled` | be | napi automatikus ellenőrzés |
+| `check_time` | `03:40` | az ellenőrzés időpontja (a kihagyottat 2 órán belül pótolja) |
+| `check_workers` | 8 | párhuzamosan ellenőrzött csatornák |
+| `host_conc` | 4 | egyidejű kérések egy szolgáltatói hostra |
+| `host_gap` | 0.1 | szünet két kérés között ugyanarra a hostra (mp) |
+| `probe_timeout` | 6 | kérés-időkorlát ellenőrzéskor (mp) |
+| `seg_time_cap` | 6.0 | egy szegmens mérésének időkorlátja (mp) |
+| `min_margin` | 1.2 | ez alatt nem stabil a forrás (szegmenshossz / letöltési idő) |
+| `switch_factor` | 1.5 | ennyiszer jobbnak kell lennie az új forrásnak a váltáshoz |
+| `parallel_probe` | be | gyenge forrásnál párhuzamos (Range) mérés is |
+| `auto_candidates` | be | ugyanazon csatorna keresése a relay hostokon (`/live/<slug>/index.m3u8`) |
+| `relays` | üres | relay hostok, soronként egy (`http://host`) |
+| *Élő átváltás* | | |
+| `failover_enabled` | be | átváltás lejátszás közben |
+| `failover_errors` | 3 | ennyi egymás utáni hiba után vált |
+| `failover_stall` | 45 | ennyi mp új szegmens nélkül → vált |
+| `failover_cooldown` | 600 | két átváltás között legalább ennyi mp (csatornánként) |
+| *Értesítés* | | |
+| `webhook_url` | üres | webhook URL (JSON POST) |
+| `webhook_events` | `dead,recovered,failover,failover_failed,switched` | értesítendő események |
+| *Statisztika* | | |
+| `stats_enabled` | be | nézettségi statisztika gyűjtése |
+| `stats_days` | 90 | megőrzés (nap) |
 
-A lejátszói végpontok szándékosan jelszó nélküliek, mert a legtöbb lejátszó nem tud
-hitelesíteni. **Ne nyisd ki a portot az internetre** (port forward). Külső eléréshez a tokenes
-`/tv/` útvonalat használd reverse proxy vagy tunnel mögött.
-
-## Lejátszók beállítása
-- **VLC:** Média → Hálózati adatfolyam megnyitása → `http://<gép>:8095/playlist.m3u`
-- **Kodi:** PVR IPTV Simple Client → M3U: `…/playlist.m3u`, EPG: `…/epg.xml.gz`
-- **Jellyfin:** Vezérlőpult → Élő TV → Tuner: M3U Tuner `…/playlist.m3u`; TV-műsorújság: XMLTV `…/epg.xml.gz`
-- **NextPVR:** Settings → Devices → Add IPTV → M3U `…/playlist.m3u`, EPG: XMLTV `…/epg.xml.gz`
-- **TVHeadend:** IPTV Automatic Network → URL `…/playlist.m3u`; EPG: XMLTV grabber az `…/epg.xml.gz`-re
-
-A csatorna-URL (`/ch/<id>.ts`) állandó: a katalógus szerkesztésekor sem változik, így a PVR-ben
-tárolt csatornák nem vesznek el.
-
-## Külső elérés (reverse proxy)
-Csak a `/tv/` útvonalat engedd ki, az admin felületet és az `/api/`-t soha. nginx példa:
-```nginx
-location /tv/ {
-    proxy_pass http://127.0.0.1:8095;
-    proxy_buffering off;            # élő stream: ne pufferelje
-    proxy_read_timeout 1h;
-    proxy_set_header Host $host;
-}
+## 8. Katalógus
+Fájl: `/var/lib/iptv-ts-proxy/katalog.json`.
+```json
+{"updated": "…", "channels": [
+  {"id": "m1.hu", "chno": "1", "name": "M1", "group": "Közszolgálati", "tvg_id": "m1.hu",
+   "logo": "", "urls": ["http://…/index.m3u8", "http://…/index.m3u8"],
+   "enabled": true, "pin": null, "url_meta": {"http://…": {"label": "tartalék", "disabled": false}}}
+]}
 ```
-Utána állítsd be a külső előtagot (`TSP_EXTERNAL_BASE=https://tv.example.com/tv`, vagy az
-admin felület **Beállítások** fülén az `external_base` értéket). Cloudflare Tunnelnél ugyanígy
-csak a `/tv/*` útvonalat publikáld; a valós néző-IP a `CF-Connecting-IP` fejlécből jön.
+- **`id`**: a csatorna-URL azonosítója (`/ch/<id>.ts`). A `tvg-id`-ből készül (ütközésnél `-2`
+  utótaggal), és **szerkesztéskor sem változik**, így a PVR-ben tárolt csatornák megmaradnak.
+- **`urls`**: a sorrend számít, az első engedélyezett az aktív forrás. Az ellenőrzés ezt a
+  sorrendet frissíti.
+- **`enabled: false`**: kikapcsolt csatorna (nincs playlistben, nincs adás).
+- **`pin`**: rögzített forrás, ezt sem az ellenőrzés, sem az átváltás nem váltja le.
+- **`url_meta`**: forrásonként címke és tiltás.
 
-## Hogyan működik
-- **On-demand:** egy csatornát csak akkor tölt, ha nézik; 20 mp néző nélkül leáll.
-  Több néző esetén is egyetlen letöltés megy, gyűrűpufferből szolgálja ki őket.
-- **Katalógus:** az induló M3U-ból jön létre, utána az admin felületen szerkeszthető (források,
-  sorrend, csoportok, import/export, visszaállítható mentések).
-- **Forrás-ellenőrzés:** naponta (alap 03:40) megméri a forrásokat, és a legjobbat teszi előre.
-  Lejátszás közben hiba vagy megakadás esetén másik működő forrásra vált, a kliens kapcsolata
-  nem szakad meg.
-- **Webhook:** kiesésről, visszatérésről, átváltásról JSON POST-ot küld (pl. Home Assistantnak).
+**Import** (admin → Csatornák → Import M3U, URL-ből vagy beillesztett szövegből): „csak új
+csatornák” vagy „új csatornák + új forrás-URL-ek az ismertekhez” (összefésülés név / `tvg-id`
+alapján). **Export:** JSON, illetve M3U (összes vagy csak élő). Minden módosítás előtt pillanatkép
+készül (`catalog-history/`), ez a **Mentések** ablakból visszaállítható.
 
-A finomhangolás (párhuzamosság, puffer, ellenőrzés időpontja, failover küszöbök, relay hostok,
-webhook) az admin felület **Beállítások** fülén van. Az ott mentett értékek felülírják az env
-fájl értékeit.
+## 9. Forrás-ellenőrzés és átváltás
+**Mérés.** Minden jelöltnél (a csatorna nem tiltott URL-jei, plusz a relay hostokon talált
+párok) letölti a playlistet, master playlistnél a legjobb variánst, majd az utolsó teljes
+szegmenst. A mérőszám a **margin = szegmenshossz / letöltési idő**. Ha ez gyenge, párhuzamos
+Range-részekkel is megméri, mert a lejátszás is így tölt. Az effektív érték a kettő közül a
+jobb.
 
-## Fájlok
+| Állapot | Feltétel |
+|---|---|
+| `jo` | effektív margin ≥ 1,5 |
+| `hatar` | ≥ `min_margin` |
+| `instabil` | él, de gyenge vagy nem mérhető |
+| `halott` | egyik jelölt playlistje sem érvényes |
+| `ismeretlen` | még nem mérték |
+
+**Kiválasztás.** A legjobb effektív margin kerül előre. Csak akkor vált, ha az új `switch_factor`-szor
+jobb, vagy a mostani nem elég jó. Rögzített forrásnál nem vált.
+**Módok:** `measure` (teljes mérés és kiválasztás) vagy `quick` (csak él-e). Automatikusan naponta
+`check_time`-kor fut, kézzel az **Ellenőrzés** fülön vagy egy csatornára a szerkesztőből.
+**Udvariasság:** hostonként legfeljebb `host_conc` egyidejű kérés, `host_gap` szünettel.
+
+**Élő átváltás.** Ha egy nézett csatornán `failover_errors` egymás utáni hiba történik, vagy
+`failover_stall` mp-ig nem jön új szegmens, a proxy a következő működő jelöltre vált. Ha nincs 12
+óránál frissebb mérés, azonnal mér. A katalógus sorrendjét is frissíti, a futó adás pedig
+megszakítás nélkül az új forrásról folytatódik.
+
+## 10. EPG és logók
+Az `epg_source` XMLTV-t `epg_refresh` másodpercenként olvassa (gzip is lehet), és **csak az
+engedélyezett csatornák `tvg-id`-jére** szűri. A katalógus `tvg_id` mezőjének egyeznie kell az
+XMLTV `<channel id="…">` értékével. A katalógus módosításakor az EPG magától újraszűrődik.
+
+Logó: a katalógus `logo` URL-je, ha van. Ha nincs, a `logos_dir/<csatornanév>.png` fájl a
+`/logo/<id>.png` címen. A logókönyvtár ne a `/home` alatt legyen, mert a szolgáltatás onnan nem
+olvashat.
+
+## 11. Értesítés (webhook)
+Ha a `webhook_url` be van állítva, a `webhook_events` eseményeiről JSON POST megy:
+```json
+{"i": 42, "t": 1762531200.5, "type": "failover", "id": "m1.hu", "name": "M1", "detail": "…"}
+```
+Típusok: `dead`, `recovered`, `switched`, `failover`, `failover_failed`, `failover_blocked`,
+`check_done`. Home Assistantban egy webhook-triggeres automatizmus fogadja
+(`https://<ha>/api/webhook/<webhook_id>`).
+
+## 12. JSON API
+Minden végpont `/api/…` alatt van, Basic auth-tal. A POST-hoz `Content-Type: application/json`
+kell (CSRF-védelem).
+
+| Metódus és út | Mi |
+|---|---|
+| `GET status` | állapot, verzió, aktív adások |
+| `GET catalog` | katalógus |
+| `POST catalog/channel` | új csatorna |
+| `POST catalog/channel/<id>/update`, `…/delete` | módosítás, törlés |
+| `POST catalog/reorder`, `catalog/renumber`, `catalog/bulk` | sorrend, újraszámozás, tömeges művelet |
+| `POST catalog/import` | M3U import (`{"url"…}` vagy `{"text"…}`, `"mode":"add_new"\|"merge"`) |
+| `GET catalog/export?format=json\|m3u&scope=all\|alive` | export |
+| `GET catalog/history`, `POST catalog/restore` | mentések |
+| `GET health`, `GET health/channel/<id>` | mérési eredmények |
+| `POST health/run` | ellenőrzés indítása: `{"mode":"quick\|measure","ids":[…]}` |
+| `POST health/check/<id>` | egy csatorna mérése (szinkron) |
+| `GET events`, `GET stats?days=N` | események, statisztika |
+| `GET config`, `POST config` | beállítások (`{"set":{…}}`, `{"reset":[…]}`) |
+| `POST reload` | `{"what":"epg\|catalog"}` |
+| `POST channel/<id>/stop`, `POST channel/<id>/kick/<kliens>` | adás leállítása, néző kirúgása |
+| `POST channel/<id>/probe`, `GET channel/<id>.m3u` | próbaletöltés, egycsatornás M3U |
+| `GET logs?after=<n>` | napló |
+
+Példa: teljes mérés parancssorból
+```bash
+curl -u x:JELSZÓ -H 'Content-Type: application/json' -d '{"mode":"measure"}' http://127.0.0.1:8095/api/health/run
+```
+
+## 13. Biztonság
+- A lejátszói végpontok (playlist, EPG, stream) **hitelesítés nélküliek**, mert a lejátszók
+  többsége nem tud hitelesíteni. Ezért a portot **ne nyisd ki az internetre**. Külső eléréshez a
+  tokenes `/tv/` útvonalat használd, és csak azt engedd ki reverse proxyn vagy tunnelen.
+- Az admin és az API jelszóval védett. Rossz jelszónál 0,5 mp a késleltetés, és a POST csak JSON
+  lehet.
+- A szolgáltatás saját, jogosultság nélküli felhasználóval fut (`iptv-ts-proxy`), sandboxolt
+  systemd unitban: `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`, csak
+  az adatkönyvtár írható, `MemoryMax=512M`.
+- A titkok a `/etc/iptv-ts-proxy/iptv-ts-proxy.env` fájlban vannak (root, `600`).
+- A `/status` végpont nyitott, és a nézett csatornák nevét mutatja (néző-IP nélkül).
+
+## 14. Fájlok és mentés
 | Útvonal | Tartalom |
 |---|---|
-| `/opt/iptv-ts-proxy/` | program (`app/`), Python venv, `install.sh`, mentések |
-| `/etc/iptv-ts-proxy/iptv-ts-proxy.env` | beállítások és titkok (root, 600) |
-| `/var/lib/iptv-ts-proxy/` | katalógus, mentések, mérések, események, statisztika, `settings.json` |
-| `/etc/systemd/system/iptv-ts-proxy.service` | systemd unit (sandboxolt) |
+| `/opt/iptv-ts-proxy/app/` | a program |
+| `/opt/iptv-ts-proxy/venv/` | Python környezet (`aiohttp`) |
+| `/opt/iptv-ts-proxy/install.sh` | a telepítő másolata (kezeléshez) |
+| `/opt/iptv-ts-proxy/backup-<idő>/` | az előző programverziók (az utolsó 3) |
+| `/etc/iptv-ts-proxy/iptv-ts-proxy.env` | beállítások és titkok |
+| `/var/lib/iptv-ts-proxy/` | `katalog.json`, `catalog-history/`, `settings.json`, `health.json`, `events.jsonl`, `usage.jsonl`, `epg.xml.gz` |
+| `/etc/systemd/system/iptv-ts-proxy.service` | systemd unit |
 | `/var/log/iptv-ts-proxy-install.log` | a telepítő naplója |
 
-Mentéshez elég a `/etc/iptv-ts-proxy/` és a `/var/lib/iptv-ts-proxy/` mappa.
+**Mentéshez** elég a `/etc/iptv-ts-proxy/` és a `/var/lib/iptv-ts-proxy/` mappa. Lásd:
+[`docs/TELEPITES.md` → Mentés és visszaállítás](docs/TELEPITES.md#9-mentés-és-visszaállítás).
 
-## Hibaelhárítás
-| Tünet | Teendő |
-|---|---|
-| `hiányzó függőség: venv` | Debian/Ubuntu: `sudo apt install python3-venv` |
-| `pip install nem sikerült` | internet/DNS ellenőrzése; HTTP proxy mögött: `sudo -E env HTTPS_PROXY=… ./install.sh` |
-| a szolgáltatás nem indul | `journalctl -u iptv-ts-proxy -n 50`; foglalt port: `sudo ./install.sh reconfigure` |
-| üres playlist | nincs katalógus: admin → Csatornák → Import M3U; vagy a csatornák még „halottak”: `?all=1` |
-| a playlist megvan, a lejátszás nem indul | admin → Csatornák → **Teszt**; csak titkosítatlan, TS-szegmenses HLS támogatott |
-| nincs EPG | admin → Beállítások → `epg_source`; a csatornák `tvg-id`-jének egyeznie kell az XMLTV-vel |
-| nem látszanak a logók | a logókönyvtár ne a `/home` alatt legyen (a unit `ProtectHome=true`) |
-| a LAN-ról nem érhető el | `TSP_LISTEN=0.0.0.0` és tűzfal (a telepítő kiírja az ufw/firewalld parancsot, de nem futtatja) |
-
-## Korlátok
-- Csak titkosítatlan, MPEG-TS szegmenses HLS támogatott (AES-128 és fMP4/CMAF nem).
+## 15. Korlátok
+- Csak **titkosítatlan, MPEG-TS szegmenses HLS** támogatott. AES-128, SAMPLE-AES, DRM és fMP4/CMAF nem.
+- Nincs átkódolás: a stream bitre azonos a forrással.
 - A felület magyar nyelvű.
+- Egy példány egy gépen fut, nincs fürtözés.
 
-## Fejlesztés, teszt
+## 16. Fejlesztés és teszt
+```
+app/            proxy.py (HLS→TS, végpontok, életciklus), catalog.py, health.py, admin.py, admin.html
+install.sh      telepítő varázsló
+tests/          e2e.sh (végponttól végpontig, root nélkül), fake_upstream.py (hamis HLS-szolgáltató)
+docs/           TELEPITES.md
+make-release.sh kiadási csomag: dist/iptv-ts-proxy-<verzió>.tar.gz + .sha256
+```
 ```bash
-tests/e2e.sh          # root és systemd nélkül: staging telepítés + élő teszt egy hamis HLS-szolgáltatóval
-./make-release.sh     # dist/iptv-ts-proxy-<verzió>.tar.gz + .sha256
+tests/e2e.sh        # staging telepítés (--root), indítás, stream/EPG/auth/token, frissítés, eltávolítás
+./make-release.sh   # tiszta git munkakönyvtárból
+```
+Helyi futtatás telepítés nélkül:
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r app/requirements.txt
+TSP_ADMIN_PASSWORD=valami TSP_SOURCE=https://…/lista.m3u .venv/bin/python -I app/proxy.py --port 8095 --data ./data
 ```
