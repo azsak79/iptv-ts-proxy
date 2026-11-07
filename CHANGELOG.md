@@ -13,4 +13,5 @@ Az első általánosan telepíthető kiadás. A saját üzemi 2.0-s verzióból 
 - EPG-forrás nélkül nincs óránkénti hibaüzenet.
 - Az elérhetetlen induló M3U nem dönti le az indulást (üres katalógussal indul, a következő indításkor újrapróbálja).
 - A telepítő a CA-tárat is ellenőrzi, és hiány esetén telepíti a `ca-certificates` csomagot.
+- Interaktív telepítésnél a hiányzó `whiptail` is települ (sikertelen telepítésnél szöveges mód).
 - Exportált M3U: EPG-cím nélkül nincs üres `x-tvg-url` a fejlécben.

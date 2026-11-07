@@ -27,7 +27,11 @@ Friss, minimál rendszeren a hiányzó csomagokat a telepítő a disztró csomag
 | pacman (Arch) | `python ca-certificates` |
 
 Csak azt telepíti, ami hiányzik. Az `aiohttp` a programhoz tartozó venv-be kerül, a rendszer
-Pythonját nem módosítja. A `whiptail` (grafikus varázsló) opcionális, nem telepíti.
+Pythonját nem módosítja.
+
+Interaktív futásnál a grafikus varázslóhoz a `whiptail`-t is felteszi, ha hiányzik (apt: `whiptail`,
+dnf/yum/zypper: `newt`, pacman: `libnewt`). Ha ez nem sikerül, szöveges módban folytatja.
+`--unattended`, `IPTV_UI=plain` és `--no-deps` esetén nem telepíti.
 Ha a rendszer Pythonja régebbi 3.9-nél (pl. RHEL 8: 3.6), előbb telepíts újabbat (`dnf install python3.11`), a telepítő megtalálja.
 - root jog a telepítéshez (a szolgáltatás saját, jogosultság nélküli felhasználóval fut)
 
@@ -42,8 +46,8 @@ A varázsló sorban megkérdezi: **port** (alap 8095), elérhető legyen-e a **h
 **logókönyvtár**, és kell-e **külső, tokenes elérés**. A végén elindítja a szolgáltatást,
 ellenőrzi, hogy válaszol-e, és kiírja a címeket.
 
-Grafikus (whiptail) felület akkor jelenik meg, ha a `whiptail` telepítve van; különben sima
-szöveges kérdéseket kapsz. A szöveges mód kikényszeríthető: `IPTV_UI=plain sudo -E ./install.sh`.
+A varázsló grafikus (whiptail) felületen fut; a hiányzó `whiptail`-t a telepítő felteszi.
+A szöveges mód kikényszeríthető: `sudo IPTV_UI=plain ./install.sh`.
 
 ### Telepítés kérdések nélkül (automatizáláshoz)
 ```bash

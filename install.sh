@@ -60,7 +60,8 @@ trap 'rc=$?; [ "$rc" = 130 ] && exit 130; die "váratlan hiba a(z) $LINENO. sorb
 cancel() { printf '%sMegszakítva.%s\n' "$Y" "$N" >&2; log "megszakítva"; exit 130; }
 
 UI=plain
-if [ "$UNATTENDED" = 0 ] && [ "${IPTV_UI:-}" != plain ] && [ -t 0 ] && [ -t 1 ] && command -v whiptail >/dev/null 2>&1; then UI=whiptail; fi
+want_whiptail() { [ "$UNATTENDED" = 0 ] && [ "${IPTV_UI:-}" != plain ] && [ -t 0 ] && [ -t 1 ]; }
+if want_whiptail && command -v whiptail >/dev/null 2>&1; then UI=whiptail; fi
 TITLE="iptv-ts-proxy $PKG_VERSION telepítő"
 
 # ask_input <kérdés> <alapérték> -> stdout
@@ -126,8 +127,8 @@ pkg_install() {
         zypper)  zypper --non-interactive install "$@" ;;
         pacman)  pacman -Sy --noconfirm --needed "$@" ;;
         apk)     apk add --no-cache "$@" ;;
-        *) die "nem ismert csomagkezelő; telepítsd kézzel: $*" ;;
-    esac >>"$LOG" 2>&1 || die "a csomagtelepítés nem sikerült (napló: $LOG)"
+        *) warn "nem ismert csomagkezelő; telepítsd kézzel: $*"; return 1 ;;
+    esac >>"$LOG" 2>&1
 }
 
 # CA-tár: a disztrók szokásos bundle-fájljai, végül a Python saját (fájlból betöltött) tára
@@ -138,6 +139,24 @@ has_ca() {
         [ -s "$f" ] && return 0
     done
     "$PY" -c "import ssl,sys;sys.exit(0 if ssl.create_default_context().cert_store_stats()['x509_ca'] else 1)" >/dev/null 2>&1
+}
+
+# a grafikus varázslóhoz; csak interaktív futásnál, és ha nem sikerül, marad a szöveges mód
+ensure_whiptail() {
+    [ "$UI" = plain ] && want_whiptail && [ "$NO_DEPS" = 0 ] || return 0
+    local pk
+    case $(pkg_mgr) in
+        apt-get) pk=whiptail ;;
+        dnf|yum|zypper|apk) pk=newt ;;
+        pacman) pk=libnewt ;;
+        *) return 0 ;;
+    esac
+    info "a grafikus varázslóhoz a whiptail kell: telepítés ($pk)"
+    if pkg_install "$pk" && command -v whiptail >/dev/null 2>&1; then
+        UI=whiptail
+    else
+        warn "a whiptail nem települt, szöveges módban folytatom (napló: $LOG)"
+    fi
 }
 
 find_python() {
@@ -169,7 +188,7 @@ check_deps() {
             apk) pk=(python3 py3-virtualenv ca-certificates) ;;
         esac
         confirm "Hiányzik: ${missing[*]}. Telepítsem ezeket: ${pk[*]}?" || die "függőség nélkül nem folytatható"
-        pkg_install "${pk[@]}"
+        pkg_install "${pk[@]}" || die "a csomagtelepítés nem sikerült (napló: $LOG)"
         PY=$(find_python) || die "Python >= $PY_MIN_MAJOR.$PY_MIN_MINOR nem található a telepítés után sem"
         "$PY" -c "import venv, ensurepip" >/dev/null 2>&1 || die "a Python venv modul nem működik ($PY -m venv)"
         has_ca || warn "a CA-tár még mindig üres: a HTTPS-es források nem fognak működni (update-ca-certificates?)"
@@ -469,6 +488,7 @@ do_install() {
         info "már telepítve van ($ENV_FILE megvan): a beállítások maradnak, a fájlok frissülnek"
         CMD=update
     fi
+    [ "$CMD" = update ] || ensure_whiptail
     check_deps
     if [ "$CMD" = update ]; then
         [ -f "$ENV_FILE" ] || die "nincs telepítve (nincs $ENV_FILE); előbb: $0 install"
