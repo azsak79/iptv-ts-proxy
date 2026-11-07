@@ -10,6 +10,9 @@ szolgáltatásként, telepítő varázslóval.
 - **Telepítés lépésről lépésre:** [`docs/TELEPITES.md`](docs/TELEPITES.md)
 - **Gyors telepítés:** `sudo ./install.sh` a kicsomagolt mappában (részletek lent)
 - **Változások:** [`CHANGELOG.md`](CHANGELOG.md)
+- **Hibajelentés, ötlet:** [Issues](https://github.com/azsak79/iptv-ts-proxy/issues). Írd meg a disztrót, a
+  verziót (`install.sh status`) és a napló releváns sorait (`journalctl -u iptv-ts-proxy -n 50`).
+  Szolgáltatói URL-t és jelszót ne tegyél be.
 
 ---
 
@@ -76,8 +79,9 @@ Követelmény: Linux **systemd**-del, **Python ≥ 3.9**, internet a telepítés
 csomagokat (`python3`, `python3-venv`, `ca-certificates`, `whiptail`) a telepítő felteszi.
 
 ```bash
-git clone git@github.com:azsak79/iptv-ts-proxy.git
-cd iptv-ts-proxy
+V=2.1.0
+curl -fL https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz | tar xz
+cd iptv-ts-proxy-$V
 sudo ./install.sh
 ```
 A varázsló után megnyitható az admin felület: `http://<gép-IP>:8095/admin`. A lejátszóba a

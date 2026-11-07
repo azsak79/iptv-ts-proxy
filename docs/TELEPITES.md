@@ -44,24 +44,27 @@ nem nyúl. Ha a rendszer Pythonja régebbi 3.9-nél (pl. RHEL 8: 3.6), előbb te
 (`sudo dnf install python3.11`); a telepítő megtalálja a `python3.9` … `python3.13` parancsokat.
 
 ## 2. Letöltés
-A tároló privát, ezért a letöltéshez a GitHub-fióknak hozzáférése kell legyen.
+A tároló nyilvános: https://github.com/azsak79/iptv-ts-proxy. Fiók nem kell hozzá.
 
-**A) git clone** (SSH-kulccsal vagy tokennel):
+**A) kiadási csomag (ajánlott):** egy kipróbált, rögzített verzió.
+```bash
+sudo apt install -y curl         # ha nincs (Fedora: dnf install curl)
+V=2.1.0
+curl -fLO https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz
+curl -fLO https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz.sha256
+sha256sum -c iptv-ts-proxy-$V.tar.gz.sha256
+tar xzf iptv-ts-proxy-$V.tar.gz
+cd iptv-ts-proxy-$V
+```
+A legújabb verzió és a változások listája: [Releases](https://github.com/azsak79/iptv-ts-proxy/releases).
+
+**B) git clone:** a legfrissebb fejlesztői állapot (`main`).
 ```bash
 sudo apt install -y git          # ha nincs (Fedora: dnf install git)
-git clone git@github.com:azsak79/iptv-ts-proxy.git
+git clone https://github.com/azsak79/iptv-ts-proxy.git
 cd iptv-ts-proxy
 ```
-Egy adott verzió: `git checkout v2.1.0`.
-
-**B) kiadási csomag** (Releases → `iptv-ts-proxy-<verzió>.tar.gz`). Privát tárolónál böngészőből
-töltsd le, vagy a GitHub CLI-vel:
-```bash
-gh release download v2.1.0 -R azsak79/iptv-ts-proxy -p 'iptv-ts-proxy-*.tar.gz*'
-sha256sum -c iptv-ts-proxy-2.1.0.tar.gz.sha256
-tar xzf iptv-ts-proxy-2.1.0.tar.gz
-cd iptv-ts-proxy-2.1.0
-```
+Egy adott kiadás: `git checkout v2.1.0`. Frissítésnél elég a `git pull`.
 
 ## 3. Telepítés a varázslóval
 ```bash
