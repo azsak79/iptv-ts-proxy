@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IPTV TS proxy</title>
+<style>
+:root{--bg:#0f1419;--panel:#171d25;--panel2:#1d2530;--line:#2a3441;--fg:#d9e1ec;--mut:#8394a9;--acc:#4da3ff;--ok:#3fb67a;--warn:#e5a93b;--err:#e5605a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:8px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;font-weight:600}
+header .ver{color:var(--mut);font-size:12px}
+nav{display:flex;gap:2px;flex-wrap:wrap}
+nav button{background:none;border:0;color:var(--mut);padding:8px 12px;cursor:pointer;font:inherit;border-bottom:2px solid transparent}
+nav button.on{color:var(--fg);border-bottom-color:var(--acc)}
+.sp{flex:1}
+main{padding:16px 20px;max-width:1600px;margin:0 auto}
+.tab{display:none}.tab.on{display:block}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 14px}
+.card .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.card .v{font-size:23px;font-weight:600;margin-top:2px}
+.card .s{color:var(--mut);font-size:12px;margin-top:2px;word-break:break-all}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line)}
+th,td{padding:6px 9px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+th{background:var(--panel2);color:var(--mut);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em;position:sticky;top:49px;z-index:2}
+tr:last-child td{border-bottom:0}
+tr:hover td{background:#1a212b}
+tr.off td{opacity:.5}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.mut{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#3a4656;margin-right:6px}
+.dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.st{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;border:1px solid var(--line)}
+.st.jo{background:#16392a;color:#6fdca6;border-color:#245a40}.st.hatar{background:#3a3315;color:#f0cf6a;border-color:#5c5020}
+.st.instabil{background:#3d2a12;color:#f0a65a;border-color:#6a4519}.st.halott{background:#3d1b1b;color:#f08a85;border-color:#6a2a2a}
+.st.ismeretlen{color:var(--mut)}
+button.b,a.b{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit;font-size:12px;text-decoration:none;display:inline-block}
+button.b:hover,a.b:hover{border-color:var(--acc)}
+button.b.pri{background:var(--acc);border-color:var(--acc);color:#04182e;font-weight:600}
+button.b.dan:hover{border-color:var(--err);color:var(--err)}
+button.b:disabled{opacity:.5;cursor:default}
+input,select,textarea{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+input[type=checkbox]{width:auto}
+.bar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.logo{width:44px;height:28px;object-fit:contain;background:#0b0f14;border-radius:4px;vertical-align:middle}
+canvas.spark{width:120px;height:26px;display:block}
+.clients{margin:4px 0 0;padding:0;list-style:none;font-size:12px;color:var(--mut)}
+.clients li{display:flex;gap:10px;align-items:center;padding:1px 0}
+.cfgsec{margin-bottom:18px}
+.cfgsec h3{font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px}
+.cfg{display:grid;grid-template-columns:300px 1fr;gap:8px 18px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 18px;align-items:start;max-width:1100px}
+.cfg label{font-weight:500}.cfg .h{color:var(--mut);font-size:12px;font-weight:400}
+.cfg input[type=text],.cfg input[type=number],.cfg input[type=time]{width:100%;max-width:560px}
+.cfg textarea{width:100%;max-width:560px;min-height:70px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.cfg .mod{color:var(--warn);font-size:11px;margin-left:6px}
+.logbox{background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:10px 12px;height:68vh;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.logbox .WARNING{color:var(--warn)}.logbox .ERROR{color:var(--err)}.logbox .t{color:var(--mut)}
+.banner{background:#3a2a10;border:1px solid var(--warn);color:#ffd9a0;padding:8px 14px;border-radius:8px;margin-bottom:14px;display:none}
+#toast{position:fixed;right:18px;bottom:18px;background:var(--panel2);border:1px solid var(--line);padding:10px 16px;border-radius:8px;display:none;max-width:460px;z-index:50}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--panel2);border:1px solid var(--line);color:var(--mut)}
+.small{font-size:12px}
+h2{font-size:14px;margin:20px 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+dialog{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:0;max-width:1000px;width:94vw}
+dialog::backdrop{background:rgba(0,0,0,.6)}
+.dh{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.dh h3{margin:0;font-size:15px}
+.db{padding:14px 18px;max-height:72vh;overflow:auto}
+.df{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center}
+.fg{display:grid;grid-template-columns:140px 1fr;gap:8px 14px;align-items:center;margin-bottom:12px}
+.fg input[type=text],.fg input[type=url]{width:100%}
+.srcs td{padding:4px 6px}.srcs td:nth-child(2){width:52%}.srcs input.url{width:100%;min-width:300px;font:12px ui-monospace,Menlo,Consolas,monospace}
+.srcs tr.act td{background:#16251e}
+.bulk{display:none;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--acc);border-radius:8px;padding:6px 12px;margin-bottom:10px}
+.bar-h{height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;margin:6px 0}.bar-h>i{display:block;height:100%;background:var(--acc)}
+.badge{display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;background:var(--panel2);border:1px solid var(--line)}
+.badge.dead,.badge.failover_failed{color:var(--err);border-color:#6a2a2a}.badge.recovered{color:var(--ok);border-color:#245a40}
+.badge.switched,.badge.failover{color:var(--warn);border-color:#5c5020}
+</style>
+</head>
+<body>
+<header>
+  <h1>IPTV TS proxy</h1><span class="ver" id="ver"></span>
+  <nav>
+    <button data-tab="dash" class="on">Műszerfal</button>
+    <button data-tab="chan">Csatornák</button>
+    <button data-tab="hlth">Ellenőrzés</button>
+    <button data-tab="evt">Események</button>
+    <button data-tab="stat">Statisztika</button>
+    <button data-tab="cfg">Beállítások</button>
+    <button data-tab="log">Napló</button>
+  </nav>
+  <span class="sp"></span>
+  <span class="mut small" id="upt"></span>
+  <button class="b" id="rlEpg">EPG frissítés</button>
+</header>
+<main>
+  <div class="banner" id="noauth">Nincs admin jelszó beállítva (<code>TSP_ADMIN_PASSWORD</code>): a felület a hálózaton bárki számára nyitott.</div>
+
+  <!-- ======================= Műszerfal ======================= -->
+  <section class="tab on" id="dash">
+    <div class="cards">
+      <div class="card"><div class="k">Aktív adás</div><div class="v" id="cAct">–</div><div class="s" id="cChan"></div></div>
+      <div class="card"><div class="k">Nézők</div><div class="v" id="cView">–</div></div>
+      <div class="card"><div class="k">Bejövő sebesség</div><div class="v" id="cRate">–</div><div class="s">szolgáltatók felől</div></div>
+      <div class="card"><div class="k">Források</div><div class="v" id="cHl">–</div><div class="s" id="cHlS"></div></div>
+      <div class="card"><div class="k">EPG</div><div class="v" id="cEpg">–</div><div class="s" id="cEpgS"></div></div>
+    </div>
+    <h2>Aktív adások</h2>
+    <table>
+      <thead><tr><th>Csatorna</th><th>Most megy</th><th>Nézők</th><th class="num">Fut</th><th class="num">Bejövő</th><th>Sebesség (2 perc)</th><th class="num">Letöltve</th><th class="num">Hiba</th><th></th></tr></thead>
+      <tbody id="actBody"><tr><td colspan="9" class="mut">Betöltés…</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- ======================= Csatornák (katalógus) ======================= -->
+  <section class="tab" id="chan">
+    <div class="bar">
+      <input id="q" placeholder="Keresés (név, csoport, tvg-id, forrás)…" style="width:260px">
+      <select id="grp"><option value="">Minden csoport</option></select>
+      <select id="stf"><option value="">Minden állapot</option><option>jo</option><option>hatar</option><option>instabil</option><option>halott</option><option>ismeretlen</option></select>
+      <label class="small mut"><input type="checkbox" id="fEpg"> EPG nélküli</label>
+      <label class="small mut"><input type="checkbox" id="fOff"> letiltott</label>
+      <span class="sp"></span><span class="mut small" id="chCount"></span>
+      <button class="b pri" id="bNew">+ Új csatorna</button>
+      <button class="b" id="bImp">Import M3U</button>
+      <button class="b" id="bExp">Export</button>
+      <button class="b" id="bHist">Mentések</button>
+      <button class="b" id="bNum" title="A csatornaszámok 1..N a jelenlegi sorrend szerint">Újraszámozás</button>
+    </div>
+    <div class="bulk" id="bulk"><b id="bulkN">0</b> kijelölve
+      <button class="b" data-bulk="enable">Engedélyez</button><button class="b" data-bulk="disable">Letilt</button>
+      <button class="b" data-bulk="set_group">Csoport…</button><button class="b" data-bulk="check">Mérés</button>
+      <button class="b dan" data-bulk="delete">Törlés</button></div>
+    <table>
+      <thead><tr><th><input type="checkbox" id="selAll"></th><th>#</th><th></th><th>Csatorna</th><th>Csoport</th><th>Állapot</th><th>Aktív forrás</th><th>Most</th><th class="num">EPG</th><th>Élő</th><th>Műveletek</th></tr></thead>
+      <tbody id="chBody"></tbody>
+    </table>
+  </section>
+
+  <!-- ======================= Ellenőrzés ======================= -->
+  <section class="tab" id="hlth">
+    <div class="cards">
+      <div class="card"><div class="k">Jó</div><div class="v ok" id="hJo">–</div></div>
+      <div class="card"><div class="k">Határ</div><div class="v warn" id="hHatar">–</div></div>
+      <div class="card"><div class="k">Instabil</div><div class="v warn" id="hInst">–</div></div>
+      <div class="card"><div class="k">Halott</div><div class="v err" id="hHal">–</div></div>
+      <div class="card"><div class="k">Ismeretlen</div><div class="v mut" id="hIsm">–</div></div>
+      <div class="card"><div class="k">Utolsó futás</div><div class="v" id="hLast" style="font-size:16px">–</div><div class="s" id="hLastS"></div></div>
+    </div>
+    <div class="bar">
+      <button class="b pri" id="hRun">Teljes mérés most</button>
+      <button class="b" id="hQuick">Gyors ellenőrzés (csak lejátszási listák)</button>
+      <label class="small mut"><input type="checkbox" id="hOnlyProb" checked> csak a problémások</label>
+      <span class="sp"></span><span class="mut small" id="hNext"></span>
+    </div>
+    <div id="hProg" style="display:none"><div class="small mut" id="hProgT"></div><div class="bar-h"><i id="hProgB" style="width:0"></i></div></div>
+    <table>
+      <thead><tr><th>Állapot</th><th>Csatorna</th><th>Aktív forrás</th><th class="num">Margin</th><th class="num">Források</th><th class="num">Elérhetőség</th><th>Ellenőrizve</th><th></th></tr></thead>
+      <tbody id="hBody"></tbody>
+    </table>
+    <p class="mut small">Margin = egy szegmens hossza / a letöltés ideje. 1,2 alatt „instabil” (az egykapcsolatos mérés szerint); a gyenge forrásnál a proxy párhuzamos (Range) mérést is végez, mert a lejátszás is így tölt: az effektív margin a jobbik érték. Az elérhetőség a napi ellenőrzések alapján számolt arány.</p>
+  </section>
+
+  <!-- ======================= Események ======================= -->
+  <section class="tab" id="evt">
+    <div class="bar"><select id="evType"><option value="">Minden típus</option><option>dead</option><option>recovered</option><option>switched</option><option>failover</option><option>failover_failed</option><option>failover_blocked</option><option>check_done</option></select></div>
+    <table><thead><tr><th>Idő</th><th>Típus</th><th>Csatorna</th><th>Részletek</th></tr></thead><tbody id="evBody"></tbody></table>
+  </section>
+
+  <!-- ======================= Statisztika ======================= -->
+  <section class="tab" id="stat">
+    <div class="bar"><select id="stDays"><option value="1">1 nap</option><option value="7" selected>7 nap</option><option value="30">30 nap</option><option value="90">90 nap</option></select></div>
+    <div class="cards">
+      <div class="card"><div class="k">Nézési munkamenet</div><div class="v" id="sSess">–</div></div>
+      <div class="card"><div class="k">Nézési idő</div><div class="v" id="sTime">–</div></div>
+      <div class="card"><div class="k">Forgalom</div><div class="v" id="sMb">–</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start">
+      <div><h2>Csatornák</h2><table><thead><tr><th>Csatorna</th><th class="num">Nézési idő</th><th class="num">Munkamenet</th><th class="num">Forgalom</th><th class="num">Kliens</th></tr></thead><tbody id="sCh"></tbody></table></div>
+      <div><h2>Kliensek (IP)</h2><table><thead><tr><th>IP</th><th class="num">Idő</th><th class="num">MB</th></tr></thead><tbody id="sIp"></tbody></table>
+      <h2>Napi bontás</h2><table><tbody id="sDay"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ======================= Beállítások ======================= -->
+  <section class="tab" id="cfg">
+    <p class="mut small">A módosítások azonnal élnek (a futó adások a következő indításkor veszik át), és a <code>settings.json</code>-ba mentődnek – újraindítás után is megmaradnak. A sárga jelölés az alapértéktől eltérő beállítás.</p>
+    <div id="cfgForm"></div>
+    <div><button class="b pri" id="cfgSave">Mentés</button></div>
+  </section>
+
+  <!-- ======================= Napló ======================= -->
+  <section class="tab" id="log">
+    <div class="bar"><select id="lvl"><option value="">Minden szint</option><option>WARNING</option><option>ERROR</option></select>
+      <label class="small mut"><input type="checkbox" id="follow" checked> követés</label></div>
+    <div class="logbox" id="logBox"></div>
+  </section>
+</main>
+
+<!-- ======================= Szerkesztő ablak ======================= -->
+<dialog id="dEdit">
+  <div class="dh"><h3 id="eTitle">Csatorna</h3><span class="sp"></span><span class="mut small" id="eId"></span></div>
+  <div class="db">
+    <div class="fg"><label>Név *</label><input type="text" id="eName">
+      <label>Csoport</label><input type="text" id="eGroup" list="dlGroups">
+      <label>Csatornaszám</label><input type="text" id="eChno" style="max-width:120px">
+      <label>tvg-id (EPG)</label><input type="text" id="eTvg">
+      <label>Logó URL</label><input type="url" id="eLogo" placeholder="üresen: a logókönyvtár <név>.png fájlja">
+      <label>Megjegyzés</label><input type="text" id="eNote">
+      <label>Állapot</label><label><input type="checkbox" id="eEnabled"> engedélyezve (playlistben, nézhető)</label></div>
+    <datalist id="dlGroups"></datalist>
+    <h2 style="margin-top:6px">Források <span class="mut small" style="text-transform:none;letter-spacing:0">– az első engedélyezett, IP-alapú forrás az aktív; a rendszer a sorrendet a mérés alapján frissíti (rögzítéssel megakadályozható)</span></h2>
+    <table class="srcs"><thead><tr><th></th><th>URL</th><th>Címke</th><th>Tiltva</th><th>Rögzít</th><th>Utolsó mérés</th><th></th></tr></thead><tbody id="eSrc"></tbody></table>
+    <div class="bar" style="margin-top:8px"><input id="eNewUrl" placeholder="http://… új forrás URL" style="flex:1"><button class="b" id="eAddUrl">+ Hozzáad</button>
+      <button class="b" id="eCheck" title="A mentett források mérése (előbb mentsd a változtatásokat)">Mérés most</button></div>
+    <div class="small mut" id="eAuto"></div>
+  </div>
+  <div class="df"><button class="b dan" id="eDel">Törlés</button><span class="sp"></span><button class="b" id="eCancel">Mégse</button><button class="b pri" id="eSave">Mentés</button></div>
+</dialog>
+
+<dialog id="dImp">
+  <div class="dh"><h3>M3U import</h3></div>
+  <div class="db">
+    <div class="fg"><label>M3U URL</label><input type="url" id="iUrl" placeholder="https://…/lista.m3u"><label>vagy tartalom</label><textarea id="iText" rows="8" style="width:100%;font:12px ui-monospace,monospace" placeholder="#EXTM3U …"></textarea>
+      <label>Mód</label><select id="iMode"><option value="add_new">csak az új csatornák</option><option value="merge">új csatornák + az ismertekhez új forrás-URL-ek</option></select></div>
+    <div id="iRes" class="small"></div>
+  </div>
+  <div class="df"><span class="sp"></span><button class="b" data-close="dImp">Bezár</button><button class="b pri" id="iGo">Import</button></div>
+</dialog>
+
+<dialog id="dHist">
+  <div class="dh"><h3>Katalógus-mentések</h3></div>
+  <div class="db"><p class="mut small">Minden módosítás előtt automatikus mentés készül. A visszaállítás előtt is készül egy.</p><table><thead><tr><th>Mentés</th><th class="num">Csatorna</th><th class="num">Méret</th><th></th></tr></thead><tbody id="hiBody"></tbody></table></div>
+  <div class="df"><span class="sp"></span><button class="b" data-close="dHist">Bezár</button></div>
+</dialog>
+
+<dialog id="dExp">
+  <div class="dh"><h3>Export</h3></div>
+  <div class="db" style="display:flex;flex-direction:column;gap:8px">
+    <a class="b" href="/api/catalog/export?format=json" download>Katalógus (JSON, teljes)</a>
+    <a class="b" href="/api/catalog/export?format=m3u&scope=all" download>M3U – minden engedélyezett csatorna</a>
+    <a class="b" href="/api/catalog/export?format=m3u&scope=alive" download>M3U – csak az elérhetők</a>
+  </div>
+  <div class="df"><span class="sp"></span><button class="b" data-close="dExp">Bezár</button></div>
+</dialog>
+<div id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let tab='dash', cat=[], groups=[], cfgState=null, logLast=0, logLines=[], probing=0, edit=null, sel=new Set();
+const ST={jo:'jó',hatar:'határ',instabil:'instabil',halott:'halott',ismeretlen:'ismeretlen'};
+function toast(msg,err){const t=$('#toast');t.textContent=msg;t.style.borderColor=err?'var(--err)':'var(--ok)';t.style.display='block';clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display='none',4000)}
+async function api(path,body){
+  const opt=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
+  const r=await fetch(path,opt); let j={}; try{j=await r.json()}catch(e){}
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status)); return j;
+}
+const fmtDur=s=>{s=Math.floor(s);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}n ${h}ó`:h?`${h}ó ${m}p`:m?`${m}p ${s%60}mp`:`${s}mp`};
+const fmtAge=s=>s==null?'–':s<90?s+' mp':s<5400?Math.round(s/60)+' perc':Math.round(s/3600)+' óra';
+const fmtRate=k=>k>=1000?(k/1000).toFixed(1)+' Mbps':k+' kbps';
+const hhmm=t=>new Date(t*1000).toLocaleTimeString('hu',{hour:'2-digit',minute:'2-digit'});
+const dt=t=>t?new Date(t*1000).toLocaleString('hu',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'–';
+const ago=t=>t?fmtAge(Math.round(Date.now()/1000-t))+' ezelőtt':'–';
+const host=u=>{try{return new URL(u).host}catch(e){return u}};
+const stBadge=(s,eff)=>`<span class="st ${esc(s)}">${esc(ST[s]||s)}</span>${eff?` <span class="mut small">${eff}×</span>`:''}`;
+
+$$('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;$$('nav button').forEach(x=>x.classList.toggle('on',x===b));$$('.tab').forEach(s=>s.classList.toggle('on',s.id===tab));onTab()});
+function onTab(){ if(tab==='dash')pollStatus(); if(tab==='chan')loadCat(); if(tab==='hlth')loadHealth(); if(tab==='evt')loadEvents(); if(tab==='stat')loadStats(); if(tab==='cfg')loadCfg(); if(tab==='log')pollLogs(); }
+document.addEventListener('click',e=>{const c=e.target.dataset?.close; if(c)$('#'+c).close()});
+
+function spark(cv,data){
+  const w=cv.width=240,h=cv.height=52,g=cv.getContext('2d');g.clearRect(0,0,w,h);
+  if(!data.length)return; const max=Math.max(...data,500);
+  g.strokeStyle='#4da3ff';g.lineWidth=2;g.beginPath();
+  data.forEach((v,i)=>{const x=i*(w/Math.max(data.length-1,1)),y=h-2-(v/max)*(h-6);i?g.lineTo(x,y):g.moveTo(x,y)});g.stroke();
+  g.lineTo(w,h);g.lineTo(0,h);g.closePath();g.fillStyle='rgba(77,163,255,.15)';g.fill();
+}
+
+// ---------------------------------------------------------------- műszerfal
+async function pollStatus(){
+  try{
+    const s=await api('/api/status');
+    $('#ver').textContent='v'+s.version; $('#upt').textContent='fut: '+fmtDur(s.uptime_s);
+    $('#noauth').style.display=s.auth?'none':'block';
+    $('#cAct').textContent=s.sessions.length; $('#cChan').textContent=`katalógus: ${s.channels} csatorna (${s.streamable} kiszolgálható)`;
+    $('#cView').textContent=s.viewers; $('#cRate').textContent=fmtRate(s.kbps);
+    const c=s.health.counts; $('#cHl').textContent=`${c.jo+c.hatar} / ${s.channels}`;
+    $('#cHlS').textContent=`jó ${c.jo} · határ ${c.hatar} · instabil ${c.instabil} · halott ${c.halott}`+(s.health.running?' · ellenőrzés fut…':'');
+    $('#cEpg').textContent=s.epg.programmes?s.epg.programmes+' műsor':'–'; $('#cEpgS').textContent=(s.epg.channels||0)+' csatorna · '+fmtAge(s.epg.age_s);
+    const tb=$('#actBody');
+    if(!s.sessions.length){tb.innerHTML='<tr><td colspan="9" class="mut">Nincs aktív adás. Az adások az első nézővel indulnak, és néző nélkül automatikusan leállnak.</td></tr>';return}
+    tb.innerHTML=s.sessions.map(x=>`<tr>
+      <td><b>${esc(x.name)}</b><div class="mut small" title="${esc(x.upstream)}">${esc(host(x.upstream))}</div></td>
+      <td class="small">${esc(x.now)||'<span class="mut">–</span>'}</td>
+      <td>${x.clients.length}<ul class="clients">${x.clients.map(c=>`<li><span title="${esc(c.ua)}">${esc(c.ip)}</span><span>${fmtDur(c.age_s)} · ${c.mb} MB</span><a href="#" class="err" data-kick="${esc(x.id)}/${c.id}">kirúg</a></li>`).join('')}</ul></td>
+      <td class="num">${fmtDur(x.uptime_s)}</td><td class="num">${fmtRate(x.kbps)}</td>
+      <td><canvas class="spark"></canvas></td>
+      <td class="num">${x.mb_in} MB</td><td class="num ${x.errors?'warn':'mut'}">${x.errors}</td>
+      <td><button class="b dan" data-stop="${esc(x.id)}">Leállít</button></td></tr>`).join('');
+    $$('#actBody tr').forEach((tr,i)=>spark(tr.querySelector('canvas'),s.sessions[i].series));
+  }catch(e){ if(tab==='dash')$('#actBody').innerHTML=`<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>` }
+}
+document.addEventListener('click',async e=>{
+  const st=e.target.dataset?.stop, kk=e.target.dataset?.kick;
+  try{
+    if(st){ if(!confirm('Leállítod az adást? A nézők megszakadnak.'))return; await api(`/api/channel/${st}/stop`,{}); toast('Leállítva'); pollStatus() }
+    if(kk){ e.preventDefault(); const [id,c]=kk.split('/'); await api(`/api/channel/${id}/kick/${c}`,{}); toast('Kliens lecsatlakoztatva'); pollStatus() }
+  }catch(err){toast(err.message,1)}
+});
+$('#rlEpg').onclick=async()=>{const b=$('#rlEpg');b.disabled=true;try{await api('/api/reload',{what:'epg'});toast('EPG frissítve');pollStatus()}catch(e){toast(e.message,1)}b.disabled=false};
+
+// ---------------------------------------------------------------- csatornák (katalógus)
+async function loadCat(){
+  try{ const d=await api('/api/catalog'); cat=d.channels; groups=d.groups;
+    const cur=$('#grp').value; $('#grp').innerHTML='<option value="">Minden csoport</option>'+groups.map(g=>`<option ${g===cur?'selected':''}>${esc(g)}</option>`).join('');
+    $('#dlGroups').innerHTML=groups.map(g=>`<option value="${esc(g)}">`).join('');
+    renderCat();
+  }catch(e){toast(e.message,1)}
+}
+function renderCat(){
+  const q=$('#q').value.toLowerCase(), g=$('#grp').value, s=$('#stf').value, noE=$('#fEpg').checked, off=$('#fOff').checked;
+  const rows=cat.filter(c=>(!g||c.group===g)&&(!s||c.state===s)&&(!noE||!c.epg_count)&&(!off||!c.enabled)&&(!q||(c.name+' '+c.group+' '+c.tvg_id+' '+c.urls.join(' ')).toLowerCase().includes(q)));
+  $('#chCount').textContent=rows.length+' / '+cat.length+' csatorna';
+  $('#chBody').innerHTML=rows.map(c=>{const u=c.urls[0]; const a=c.urls.find(x=>!(c.url_meta[x]||{}).disabled);
+    return `<tr class="${c.enabled?'':'off'}">
+    <td><input type="checkbox" data-sel="${esc(c.id)}" ${sel.has(c.id)?'checked':''}></td>
+    <td class="mut">${esc(c.chno)}</td>
+    <td>${c.has_logo?`<img class="logo" loading="lazy" src="${c.logo?esc(c.logo):'/logo/'+esc(c.id)+'.png'}">`:''}</td>
+    <td><b>${esc(c.name)}</b>${c.enabled?'':' <span class="pill">letiltva</span>'}<div class="mut small">${esc(c.tvg_id)}</div></td>
+    <td><span class="pill">${esc(c.group)||'–'}</span></td>
+    <td>${stBadge(c.state,c.eff)}${c.uptime!=null&&c.uptime<100?` <span class="mut small" title="elérhetőség">${c.uptime}%</span>`:''}</td>
+    <td class="small">${a?esc(host(a)):'<span class="err">nincs</span>'} <span class="mut">(${c.urls.length} forrás${c.pin?' · 📌':''})</span></td>
+    <td class="small">${c.now?`${esc(c.now.title)} <span class="mut">${hhmm(c.now.start)}–${hhmm(c.now.stop)}</span>`:'<span class="mut">–</span>'}</td>
+    <td class="num ${c.epg_count?'':'warn'}">${c.epg_count}</td>
+    <td><span class="dot ${c.active?'on':''}"></span>${c.active?c.clients:''}</td>
+    <td style="white-space:nowrap"><button class="b" data-edit="${esc(c.id)}">Szerkeszt</button>
+      ${c.streamable?`<button class="b" data-probe="${esc(c.id)}">Teszt</button> <a class="b" href="/api/channel/${esc(c.id)}.m3u">VLC</a> <button class="b" data-copy="${esc(c.id)}">URL</button>`:''}
+      <span class="small mut" id="pr-${esc(c.id)}"></span></td></tr>`}).join('');
+  $('#selAll').checked=rows.length>0&&rows.every(c=>sel.has(c.id)); bulkUI();
+}
+['#q','#grp','#stf','#fEpg','#fOff'].forEach(s=>$(s).addEventListener('input',renderCat));
+function bulkUI(){ $('#bulk').style.display=sel.size?'flex':'none'; $('#bulkN').textContent=sel.size }
+$('#selAll').onchange=e=>{ const q=$('#q').value.toLowerCase(), g=$('#grp').value, s=$('#stf').value;
+  $$('#chBody input[data-sel]').forEach(i=>{i.checked=e.target.checked; e.target.checked?sel.add(i.dataset.sel):sel.delete(i.dataset.sel)}); bulkUI() };
+document.addEventListener('change',e=>{const id=e.target.dataset?.sel; if(id){e.target.checked?sel.add(id):sel.delete(id);bulkUI()}});
+document.addEventListener('click',async e=>{
+  const b=e.target.dataset?.bulk, p=e.target.dataset?.probe, cp=e.target.dataset?.copy, ed=e.target.dataset?.edit;
+  try{
+    if(b){ const ids=[...sel];
+      if(b==='delete'){ if(!confirm(`Törlöd a kijelölt ${ids.length} csatornát? (a Mentésekből visszaállítható)`))return; }
+      if(b==='check'){ await api('/api/health/run',{mode:'measure',ids}); toast('Mérés indítva'); return }
+      let value=null; if(b==='set_group'){ value=prompt('Új csoport neve:'); if(value===null)return }
+      const r=await api('/api/catalog/bulk',{ids,action:b,value}); toast(r.count+' csatorna módosítva'); if(b==='delete')sel.clear(); loadCat() }
+    if(cp){ const u=location.origin+'/ch/'+cp+'.ts'; try{await navigator.clipboard.writeText(u);toast('Másolva: '+u)}catch(_){prompt('Stream URL:',u)} }
+    if(ed) openEdit(cat.find(c=>c.id===ed));
+    if(p){ const el=$('#pr-'+CSS.escape(p)); e.target.disabled=true; el.textContent=' teszt fut (8 mp)…'; el.className='small mut'; probing++;
+      try{ const r=await api(`/api/channel/${p}/probe`,{});
+        if(r.error||r.first_byte_s==null){el.textContent=' hiba: '+(r.error||'nincs adat');el.className='small err'}
+        else{el.textContent=` első bájt ${r.first_byte_s}s · ${r.mb} MB · ${r.mbps} Mbps · ${r.ts_ok?'TS ok':'TS hibás'} · megakadás: ${r.stalls}`;el.className='small '+(r.ts_ok&&!r.stalls?'ok':'warn')}
+      }catch(err){el.textContent=' '+err.message;el.className='small err'} e.target.disabled=false; probing-- }
+  }catch(err){toast(err.message,1)}
+});
+
+// ---- szerkesztő ablak
+function openEdit(c){
+  edit=c?JSON.parse(JSON.stringify(c)):{id:null,name:'',group:'',chno:'',tvg_id:'',logo:'',megjegyzes:'',enabled:true,pin:'',urls:[],url_meta:{},results:{}};
+  $('#eTitle').textContent=c?'Csatorna szerkesztése':'Új csatorna'; $('#eId').textContent=c?('azonosító: '+c.id+' (nem változik)'):'';
+  $('#eName').value=edit.name; $('#eGroup').value=edit.group; $('#eChno').value=edit.chno; $('#eTvg').value=edit.tvg_id; $('#eLogo').value=edit.logo; $('#eNote').value=edit.megjegyzes||''; $('#eEnabled').checked=edit.enabled;
+  $('#eDel').style.display=c?'':'none'; $('#eCheck').style.display=c?'':'none'; renderSrc(); $('#dEdit').showModal();
+}
+function renderSrc(){
+  const first=edit.urls.findIndex(u=>!(edit.url_meta[u]||{}).disabled);
+  $('#eSrc').innerHTML=edit.urls.map((u,i)=>{const m=edit.url_meta[u]||{}, r=edit.results[u];
+    const res=r?(r.ok?`<span class="ok">${r.margin}×</span>${r.pmargin?` <span class="mut">(párh. ${r.pmargin}×)</span>`:''} <span class="mut">${r.connect_ms??''} ms</span>`:`<span class="${r.quick_ok?'warn':'err'}">${esc(r.error||'nem mért')}</span>`)+` <span class="mut small">${ago(r.t)}</span>`:'<span class="mut">–</span>';
+    return `<tr class="${i===first?'act':''}"><td style="white-space:nowrap"><button class="b" data-mv="${i},-1">▲</button><button class="b" data-mv="${i},1">▼</button></td>
+    <td><input class="url" data-uv="${i}" value="${esc(u)}"></td>
+    <td><input data-lb="${i}" value="${esc(m.label||'')}" style="width:100px"></td>
+    <td><input type="checkbox" data-dis="${i}" ${m.disabled?'checked':''}></td>
+    <td><input type="radio" name="pin" data-pin="${i}" ${edit.pin===u?'checked':''} title="Rögzítés: az automatikus kiválasztás nem váltja le"></td>
+    <td class="small">${res}</td><td><button class="b dan" data-rm="${i}">✕</button></td></tr>`}).join('')||'<tr><td colspan="7" class="mut">Nincs forrás.</td></tr>';
+  const gen=Object.keys(edit.results||{}).filter(u=>!edit.urls.includes(u));
+  $('#eAuto').innerHTML=gen.length?`Automatikusan talált további relay-források (a rendszer ezekre is váltani tud): ${gen.map(u=>esc(host(u))+(edit.results[u].ok?` <span class="ok">${edit.results[u].margin}×</span>`:' <span class="err">✗</span>')).join(' · ')}`:'';
+}
+function syncSrc(){ // a mezők értékei -> edit
+  const urls=$$('#eSrc input[data-uv]').map(i=>i.value.trim()); const old=edit.urls; const meta={}; let pin='';
+  $$('#eSrc input[data-uv]').forEach((i,n)=>{const u=urls[n]; const m={}; if($(`#eSrc input[data-dis="${n}"]`).checked)m.disabled=true; const lb=$(`#eSrc input[data-lb="${n}"]`).value.trim(); if(lb)m.label=lb; if(Object.keys(m).length)meta[u]=m; if($(`#eSrc input[data-pin="${n}"]`).checked)pin=u});
+  edit.urls=urls.filter(Boolean); edit.url_meta=meta; edit.pin=pin;
+}
+document.addEventListener('click',e=>{
+  const mv=e.target.dataset?.mv, rm=e.target.dataset?.rm;
+  if(mv!==undefined){ syncSrc(); const [i,d]=mv.split(',').map(Number); const j=i+d; if(j<0||j>=edit.urls.length)return; [edit.urls[i],edit.urls[j]]=[edit.urls[j],edit.urls[i]]; renderSrc() }
+  if(rm!==undefined){ syncSrc(); edit.urls.splice(+rm,1); renderSrc() }
+});
+$('#eAddUrl').onclick=()=>{ const u=$('#eNewUrl').value.trim(); if(!u)return; if(!/^https?:\/\/\S+$/.test(u))return toast('Érvénytelen URL',1); syncSrc(); if(!edit.urls.includes(u))edit.urls.push(u); $('#eNewUrl').value=''; renderSrc() };
+$('#eCancel').onclick=()=>$('#dEdit').close();
+function editFields(){ syncSrc(); return {name:$('#eName').value.trim(),group:$('#eGroup').value.trim(),chno:$('#eChno').value.trim(),tvg_id:$('#eTvg').value.trim(),logo:$('#eLogo').value.trim(),megjegyzes:$('#eNote').value.trim(),enabled:$('#eEnabled').checked,urls:edit.urls,url_meta:edit.url_meta,pin:edit.pin} }
+$('#eSave').onclick=async()=>{ try{ const f=editFields();
+  if(edit.id) await api(`/api/catalog/channel/${encodeURIComponent(edit.id)}/update`,{fields:f}); else await api('/api/catalog/channel',{fields:f});
+  $('#dEdit').close(); toast('Mentve'); loadCat() }catch(e){toast(e.message,1)} };
+$('#eDel').onclick=async()=>{ if(!confirm(`Törlöd: ${edit.name}? (a Mentésekből visszaállítható)`))return; try{ await api(`/api/catalog/channel/${encodeURIComponent(edit.id)}/delete`,{}); $('#dEdit').close(); toast('Törölve'); loadCat() }catch(e){toast(e.message,1)} };
+$('#eCheck').onclick=async()=>{ const b=$('#eCheck'); b.disabled=true; b.textContent='mérés…';
+  try{ await api(`/api/catalog/channel/${encodeURIComponent(edit.id)}/update`,{fields:editFields()});   // előbb mentjük a módosítást
+       const r=await api(`/api/health/check/${encodeURIComponent(edit.id)}`,{mode:'measure'}); const keep=editFields(); edit=r.channel; renderSrc(); toast('Mérés kész: '+(ST[r.channel.state]||r.channel.state)); loadCat();
+  }catch(e){toast(e.message,1)} b.disabled=false; b.textContent='Mérés most' };
+$('#bNew').onclick=()=>openEdit(null);
+
+// ---- import / export / mentések
+$('#bImp').onclick=()=>{$('#iRes').textContent='';$('#dImp').showModal()};
+$('#iGo').onclick=async()=>{ const b=$('#iGo'); b.disabled=true; try{ const r=await api('/api/catalog/import',{url:$('#iUrl').value.trim(),text:$('#iText').value,mode:$('#iMode').value});
+  $('#iRes').innerHTML=`<span class="ok">Új: ${r.added.length}</span> · összefésült: ${r.merged.length} · kihagyott: ${r.skipped.length} · érvénytelen: ${r.invalid}<br><span class="mut">${esc(r.added.slice(0,30).join(', '))}</span>`; loadCat() }catch(e){$('#iRes').innerHTML=`<span class="err">${esc(e.message)}</span>`} b.disabled=false };
+$('#bExp').onclick=()=>$('#dExp').showModal();
+$('#bNum').onclick=async()=>{ if(!confirm('Újraszámozod a csatornákat 1..N-ig a jelenlegi sorrend szerint?'))return; try{await api('/api/catalog/renumber',{});toast('Újraszámozva');loadCat()}catch(e){toast(e.message,1)} };
+$('#bHist').onclick=async()=>{ try{ const h=(await api('/api/catalog/history')).history;
+  $('#hiBody').innerHTML=h.map(x=>`<tr><td>${esc(x.name)}</td><td class="num">${x.channels??'–'}</td><td class="num">${Math.round(x.size/1024)} KB</td><td><button class="b" data-restore="${esc(x.name)}">Visszaállít</button></td></tr>`).join('')||'<tr><td colspan="4" class="mut">Még nincs mentés.</td></tr>'; $('#dHist').showModal() }catch(e){toast(e.message,1)} };
+document.addEventListener('click',async e=>{const n=e.target.dataset?.restore; if(!n)return; if(!confirm('Visszaállítod ezt a mentést? Az aktuális állapotról is készül mentés.'))return;
+  try{await api('/api/catalog/restore',{name:n});$('#dHist').close();toast('Visszaállítva');loadCat()}catch(err){toast(err.message,1)}});
+
+// ---------------------------------------------------------------- ellenőrzés
+const ORD={halott:0,instabil:1,hatar:2,ismeretlen:3,jo:4};
+async function loadHealth(){
+  try{ const d=await api('/api/health'); const c=d.counts;
+    $('#hJo').textContent=c.jo; $('#hHatar').textContent=c.hatar; $('#hInst').textContent=c.instabil; $('#hHal').textContent=c.halott; $('#hIsm').textContent=c.ismeretlen;
+    const l=d.last_run||{}; $('#hLast').textContent=l.t?ago(l.t):'még nem futott'; $('#hLastS').textContent=l.t?`${l.mode} · ${l.source} · ${l.secs} mp · váltás: ${l.changed}`:'';
+    $('#hNext').textContent=d.next?('következő automatikus: '+new Date(d.next*1000).toLocaleString('hu')):'az automatikus ellenőrzés ki van kapcsolva';
+    const p=d.progress; $('#hProg').style.display=d.running?'block':'none';
+    if(d.running){ $('#hProgT').textContent=`${p.mode} · ${p.source} · ${p.done} / ${p.total}`; $('#hProgB').style.width=(p.total?100*p.done/p.total:0)+'%' }
+    $('#hRun').disabled=$('#hQuick').disabled=d.running;
+    const only=$('#hOnlyProb').checked;
+    const rows=d.channels.filter(r=>r.enabled&&(!only||r.state!=='jo')).sort((a,b)=>(ORD[a.state]??9)-(ORD[b.state]??9)||a.name.localeCompare(b.name,'hu'));
+    $('#hBody').innerHTML=rows.map(r=>`<tr><td>${stBadge(r.state)}</td><td><b>${esc(r.name)}</b></td><td class="small">${esc(r.host||'–')}${r.pin?' 📌':''}</td>
+      <td class="num">${r.eff??'–'}</td><td class="num">${r.sources}</td><td class="num ${r.uptime!=null&&r.uptime<90?'warn':''}">${r.uptime!=null?r.uptime+'%':'–'}</td><td class="small mut">${ago(r.checked)}</td>
+      <td><button class="b" data-edit2="${esc(r.id)}">Szerkeszt</button></td></tr>`).join('')||'<tr><td colspan="8" class="mut">Nincs megjelenítendő csatorna.</td></tr>';
+  }catch(e){toast(e.message,1)}
+}
+document.addEventListener('click',async e=>{const id=e.target.dataset?.edit2; if(!id)return; if(!cat.length)await loadCat(); const c=cat.find(x=>x.id===id); if(c)openEdit(c)});
+$('#hOnlyProb').onchange=loadHealth;
+async function runCheck(mode){ try{ await api('/api/health/run',{mode}); toast('Ellenőrzés indítva'); loadHealth() }catch(e){toast(e.message,1)} }
+$('#hRun').onclick=()=>runCheck('measure'); $('#hQuick').onclick=()=>runCheck('quick');
+
+// ---------------------------------------------------------------- események
+async function loadEvents(){
+  try{ const t=$('#evType').value; const d=await api('/api/events'+(t?('?type='+t):''));
+    $('#evBody').innerHTML=d.events.slice().reverse().map(e=>`<tr><td class="small mut" style="white-space:nowrap">${dt(e.t)}</td><td><span class="badge ${esc(e.type)}">${esc(e.type)}</span></td><td>${esc(e.name)}</td><td class="small">${esc(e.detail)}</td></tr>`).join('')||'<tr><td colspan="4" class="mut">Még nincs esemény.</td></tr>';
+  }catch(e){toast(e.message,1)}
+}
+$('#evType').onchange=loadEvents;
+
+// ---------------------------------------------------------------- statisztika
+async function loadStats(){
+  try{ const d=await api('/api/stats?days='+$('#stDays').value);
+    $('#sSess').textContent=d.sessions; $('#sTime').textContent=(d.seconds/3600).toFixed(1)+' óra'; $('#sMb').textContent=d.mb>=1000?(d.mb/1000).toFixed(1)+' GB':d.mb+' MB';
+    $('#sCh').innerHTML=d.channels.map(c=>`<tr><td>${esc(c.name)}</td><td class="num">${(c.seconds/3600).toFixed(1)} ó</td><td class="num">${c.sessions}</td><td class="num">${c.mb} MB</td><td class="num">${c.ips}</td></tr>`).join('')||'<tr><td colspan="5" class="mut">Még nincs adat.</td></tr>';
+    $('#sIp').innerHTML=d.ips.map(c=>`<tr><td class="small">${esc(c.ip)}</td><td class="num">${(c.seconds/3600).toFixed(1)} ó</td><td class="num">${c.mb}</td></tr>`).join('');
+    const mx=Math.max(1,...d.days_list.map(x=>x.seconds)); $('#sDay').innerHTML=d.days_list.slice().reverse().map(x=>`<tr><td class="small">${esc(x.day)}</td><td class="small num">${(x.seconds/3600).toFixed(1)} ó</td><td style="width:45%"><div class="bar-h"><i style="width:${100*x.seconds/mx}%"></i></div></td></tr>`).join('');
+  }catch(e){toast(e.message,1)}
+}
+$('#stDays').onchange=loadStats;
+
+// ---------------------------------------------------------------- beállítások
+async function loadCfg(){
+  try{ cfgState=await api('/api/config'); const f=$('#cfgForm'); f.innerHTML=''; const gs={};
+    for(const [k,sp] of Object.entries(cfgState.spec)) (gs[sp.group]??=[]).push(k);
+    for(const [g,keys] of Object.entries(gs)){
+      let h=`<div class="cfgsec"><h3>${esc(g)}</h3><div class="cfg">`;
+      for(const k of keys){ const sp=cfgState.spec[k], v=cfgState.values[k], mod=k in cfgState.overrides;
+        let inp; if(sp.type==='bool') inp=`<input type="checkbox" id="cf-${k}" data-k="${k}" ${v?'checked':''}>`;
+        else if(sp.type==='text') inp=`<textarea id="cf-${k}" data-k="${k}">${esc(v)}</textarea>`;
+        else if(sp.type==='time') inp=`<input type="time" id="cf-${k}" data-k="${k}" value="${esc(v)}">`;
+        else if(sp.type==='int'||sp.type==='float') inp=`<input type="number" id="cf-${k}" data-k="${k}" value="${esc(v)}" step="${sp.type==='float'?'0.1':'1'}">`;
+        else inp=`<input type="text" id="cf-${k}" data-k="${k}" value="${esc(v)}">`;
+        h+=`<label for="cf-${k}">${esc(k)}${mod?'<span class="mod">módosítva</span>':''}<div class="h">${esc(sp.help)}${(sp.type==='int'||sp.type==='float')&&sp.min!=null?` (${sp.min}–${sp.max})`:''}</div></label>
+          <div>${inp}${mod?` <button class="b" data-reset="${k}" title="Alapérték: ${esc(cfgState.defaults[k])}">alap</button>`:''}</div>`; }
+      f.insertAdjacentHTML('beforeend',h+'</div></div>'); }
+  }catch(e){toast(e.message,1)}
+}
+$('#cfgSave').onclick=async()=>{
+  const set={}; $$('#cfgForm [data-k]').forEach(i=>{const k=i.dataset.k,sp=cfgState.spec[k]; let v;
+    if(sp.type==='bool')v=i.checked; else if(sp.type==='int')v=parseInt(i.value,10); else if(sp.type==='float')v=parseFloat(i.value); else v=i.value.trim();
+    if(JSON.stringify(v)!==JSON.stringify(cfgState.values[k]))set[k]=v});
+  if(!Object.keys(set).length)return toast('Nincs módosítás');
+  try{await api('/api/config',{set});toast('Mentve: '+Object.keys(set).join(', '));loadCfg()}catch(e){toast(e.message,1)}
+};
+document.addEventListener('click',async e=>{const k=e.target.dataset?.reset;if(!k)return;try{await api('/api/config',{reset:[k]});toast('Alapérték visszaállítva: '+k);loadCfg()}catch(err){toast(err.message,1)}});
+
+// ---------------------------------------------------------------- napló
+async function pollLogs(){
+  try{ const r=await api('/api/logs?after='+logLast); if(r.lines.length){logLines=logLines.concat(r.lines).slice(-800);logLast=r.last;renderLogs()} }catch(e){}
+}
+function renderLogs(){
+  const lv=$('#lvl').value, b=$('#logBox'); const stick=$('#follow').checked;
+  b.innerHTML=logLines.filter(l=>!lv||l.lvl===lv||(lv==='WARNING'&&l.lvl==='ERROR')).map(l=>`<div class="${l.lvl}"><span class="t">${new Date(l.t*1000).toLocaleTimeString('hu')}</span> ${esc(l.msg)}</div>`).join('');
+  if(stick)b.scrollTop=b.scrollHeight;
+}
+$('#lvl').onchange=renderLogs;
+
+setInterval(()=>{ if(document.hidden)return; if(tab==='dash')pollStatus(); if(tab==='log')pollLogs(); if(tab==='hlth')loadHealth(); if(tab==='evt')loadEvents(); },3000);
+setInterval(()=>{ if(!document.hidden&&tab==='chan'&&!probing&&!$('#dEdit').open&&!document.activeElement.matches('input,textarea'))loadCat(); },20000);
+pollStatus();
+</script>
+</body>
+</html>
