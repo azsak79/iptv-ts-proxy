@@ -130,6 +130,16 @@ pkg_install() {
     esac >>"$LOG" 2>&1 || die "a csomagtelepítés nem sikerült (napló: $LOG)"
 }
 
+# CA-tár: a disztrók szokásos bundle-fájljai, végül a Python saját (fájlból betöltött) tára
+has_ca() {
+    local f
+    for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
+             /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/ca-bundle.pem /etc/ssl/cert.pem; do
+        [ -s "$f" ] && return 0
+    done
+    "$PY" -c "import ssl,sys;sys.exit(0 if ssl.create_default_context().cert_store_stats()['x509_ca'] else 1)" >/dev/null 2>&1
+}
+
 find_python() {
     local c
     for c in python3 python3.13 python3.12 python3.11 python3.10 python3.9; do
@@ -145,19 +155,24 @@ check_deps() {
     local missing=()
     PY=$(find_python) || missing+=(python)
     if [ -n "${PY:-}" ] && ! "$PY" -c "import venv, ensurepip" >/dev/null 2>&1; then missing+=(venv); fi
+    # minimál rendszeren gyakran nincs CA-tár: enélkül a HTTPS-es M3U/EPG/stream letöltés nem megy
+    if [ -n "${PY:-}" ] && ! has_ca; then
+        missing+=(ca-certificates)
+    fi
     if [ ${#missing[@]} -gt 0 ]; then
-        [ "$NO_DEPS" = 1 ] && die "hiányzó függőség: ${missing[*]} (Python >= $PY_MIN_MAJOR.$PY_MIN_MINOR + venv modul)"
+        [ "$NO_DEPS" = 1 ] && die "hiányzó függőség: ${missing[*]} (Python >= $PY_MIN_MAJOR.$PY_MIN_MINOR + venv modul, CA-tanúsítványok)"
         local pk=()
         case $(pkg_mgr) in
-            apt-get) pk=(python3 python3-venv) ;;
-            dnf|yum|zypper) pk=(python3) ;;
-            pacman) pk=(python) ;;
-            apk) pk=(python3 py3-virtualenv) ;;
+            apt-get) pk=(python3 python3-venv ca-certificates) ;;
+            dnf|yum|zypper) pk=(python3 ca-certificates) ;;
+            pacman) pk=(python ca-certificates) ;;
+            apk) pk=(python3 py3-virtualenv ca-certificates) ;;
         esac
         confirm "Hiányzik: ${missing[*]}. Telepítsem ezeket: ${pk[*]}?" || die "függőség nélkül nem folytatható"
         pkg_install "${pk[@]}"
         PY=$(find_python) || die "Python >= $PY_MIN_MAJOR.$PY_MIN_MINOR nem található a telepítés után sem"
         "$PY" -c "import venv, ensurepip" >/dev/null 2>&1 || die "a Python venv modul nem működik ($PY -m venv)"
+        has_ca || warn "a CA-tár még mindig üres: a HTTPS-es források nem fognak működni (update-ca-certificates?)"
     fi
     info "Python: $PY ($("$PY" -V 2>&1))"
 }

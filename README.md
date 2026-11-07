@@ -13,8 +13,22 @@ lejátszó közvetlenül akadna. Csatornánként egyetlen upstream letöltés me
 
 ## Követelmények
 - Linux **systemd**-del (Debian 11+, Ubuntu 22.04+, Fedora, RHEL/Alma/Rocky 9+, openSUSE, Arch)
-- **Python ≥ 3.9** `venv` modullal (Debianon/Ubuntun: `python3-venv`; a telepítő felajánlja)
+- **Python ≥ 3.9** `venv` modullal, és CA-tanúsítványok (`ca-certificates`) a HTTPS-es forrásokhoz
 - internet a telepítéskor (`pip install aiohttp`)
+
+Friss, minimál rendszeren a hiányzó csomagokat a telepítő a disztró csomagkezelőjével felteszi
+(jóváhagyás után; `--unattended`/`--yes` esetén kérdés nélkül):
+
+| Csomagkezelő | Csomagok |
+|---|---|
+| apt (Debian, Ubuntu) | `python3 python3-venv ca-certificates` |
+| dnf / yum (Fedora, RHEL, Alma, Rocky) | `python3 ca-certificates` |
+| zypper (openSUSE) | `python3 ca-certificates` |
+| pacman (Arch) | `python ca-certificates` |
+
+Csak azt telepíti, ami hiányzik. Az `aiohttp` a programhoz tartozó venv-be kerül, a rendszer
+Pythonját nem módosítja. A `whiptail` (grafikus varázsló) opcionális, nem telepíti.
+Ha a rendszer Pythonja régebbi 3.9-nél (pl. RHEL 8: 3.6), előbb telepíts újabbat (`dnf install python3.11`), a telepítő megtalálja.
 - root jog a telepítéshez (a szolgáltatás saját, jogosultság nélküli felhasználóval fut)
 
 ## Telepítés
