@@ -206,6 +206,9 @@ beállítások az admin felületen azonnal érvényesek, újraindítás nem kell
 | `log_stream` / `log_health` / `log_access` | be | adások / ellenőrzés és események / HTTP hozzáférés |
 | `log_hdhr` / `log_epg` / `log_admin` | be | Plex-felderítés / EPG / admin műveletek |
 | `log_diag` | **ki** | 5 mp-enkénti adás-diagnosztika (csak hibakereséshez) |
+| *Csatorna-felderítés* | | |
+| `discovery_enabled` / `discovery_time` | ki / `04:20` | napi automatikus új-csatorna-keresés a relay hostokon (jelöltlista az admin Ellenőrzés fülén, importálás letiltva) |
+| `discovery_epg_names` / `discovery_names` / `discovery_max` | be / üres / 400 | a forrás-EPG nevei jelöltek / kézi szólista / egy futás jelölt-korlátja |
 | `history_keep` | 60 | katalógus-mentések száma |
 | *Forrás-ellenőrzés* | | |
 | `check_enabled` | be | napi automatikus ellenőrzés |

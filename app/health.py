@@ -71,6 +71,8 @@ class Health:
         self.history = {}        # cid -> deque([{t, state, alive, eff, host}])
         self.events = deque(maxlen=1000)
         self.running = False
+        self.discovery = {"last_run": {}, "candidates": []}
+        self.discovery_running = False
         self.progress = {"done": 0, "total": 0, "mode": "", "started": 0, "source": ""}
         self.last_run = {}
         self.last_failover = {}
@@ -99,6 +101,10 @@ class Health:
         except Exception as e:  # noqa: BLE001
             log.warning("health.json hibás, kihagyva: %s", e)
         try:
+            self.discovery = json.load(open(self._path("discovery.json"), encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            self.discovery = {"last_run": {}, "candidates": []}
+        try:
             with open(self._path("events.jsonl"), encoding="utf-8") as f:
                 for line in f.readlines()[-1000:]:
                     try:
@@ -109,6 +115,13 @@ class Health:
                         pass
         except FileNotFoundError:
             pass
+
+    def save_discovery(self):
+        os.makedirs(self.cfg.data, exist_ok=True)
+        tmp = self._path("discovery.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.discovery, f, ensure_ascii=False)
+        os.replace(tmp, self._path("discovery.json"))
 
     def save(self):
         os.makedirs(self.cfg.data, exist_ok=True)
@@ -555,6 +568,124 @@ class Health:
                                f"(margin {eff(best)})")
         return changes
 
+
+    # ------------------------------------------------------------ csatorna-felderítés
+    def _known_slugs(self):
+        """A katalógusban már ismert slugok: URL-slugok + név/tvg_id alapúak + variánsaik."""
+        known = set()
+        for c in self.A.catalog.channels:
+            for u in c.get("urls") or []:
+                sg, _ = slug_and_file(u)
+                if sg:
+                    known.add(sg)
+            for sg in self.slug_variants(c):
+                known.add(sg)
+            for n in (c.get("name"), c.get("tvg_id")):
+                sg = _asc_slug(n)
+                if sg:
+                    known.add(sg)
+        return known
+
+    def discovery_slugs(self):
+        """Ismeretlen jelölt-slugok: a forrás-EPG csatornanevei + kézi lista, utótag-variánsokkal."""
+        names = []
+        if self.cfg.discovery_epg_names:
+            for lst in (getattr(self.A, "epg_names", None) or {}).values():
+                names.extend(lst)
+        for line in (self.cfg.discovery_names or "").splitlines():
+            if line.strip():
+                names.append(line.strip())
+        wl = os.path.join(self.cfg.data, "discovery-slugs.txt")
+        try:
+            with open(wl, encoding="utf-8") as f:
+                names.extend(line.strip() for line in f if line.strip())
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log.warning("felderítés: a szólista nem olvasható (%s): %s", wl, e)
+
+        cands, seen = [], set()
+
+        def add(v):
+            sg = _asc_slug(v)
+            if not sg or not 2 <= len(sg) <= 60 or sg in seen:
+                return
+            seen.add(sg)
+            cands.append(sg)
+            core = sg
+            for suf in SLUG_SUFFIXES:
+                if core.endswith(suf):
+                    core = core[:-len(suf)]
+                    break
+            if core and core != sg:
+                for v2 in (core, core + "_hun", core + "_atk", core + "_hd"):
+                    if v2 and v2 not in seen and 2 <= len(v2) <= 60:
+                        seen.add(v2)
+                        cands.append(v2)
+
+        for n in names:
+            add(n)
+        known = self._known_slugs()
+        return [s for s in cands if s not in known][:max(1, self.cfg.discovery_max)]
+
+    def next_scheduled_discovery(self):
+        if not self.cfg.discovery_enabled:
+            return None
+        try:
+            hh, mm = [int(x) for x in self.cfg.discovery_time.split(":")]
+        except ValueError:
+            return None
+        now = time.time()
+        lt = time.localtime(now)
+        t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+        if t <= now or self.discovery.get("last_run", {}).get("scheduled_date") == time.strftime("%F", lt):
+            t += 86400
+        return t
+
+    async def discover(self, source="kézi"):
+        """Új csatornák keresése a relay hostokon: ismeretlen slugokra quick mérés (csak
+        playlist-érvényesség); a találatok jelöltlistába kerülnek, a katalógust nem írik."""
+        if self.discovery_running or self.running:
+            return False
+        hosts = self.cfg.relay_list()
+        if not hosts:
+            log.info("felderítés: nincs relay host beállítva, kihagyva")
+            return False
+        self.discovery_running = True
+        t0 = time.monotonic()
+        try:
+            slugs = self.discovery_slugs()
+            log.info("csatorna-felderítés indul (%s): %d ismeretlen jelölt-slug, %d host", source, len(slugs), len(hosts))
+            sem = asyncio.Semaphore(max(1, self.cfg.check_workers))
+            found = []
+
+            async def probe_slug(sg):
+                async with sem:
+                    for h in hosts:
+                        for fn in ("index.m3u8", "playlist.m3u8"):
+                            r = await self.probe(f"{h}/live/{sg}/{fn}", measure=False)
+                            if r.get("quick_ok"):
+                                found.append({"slug": sg, "host": h, "url": f"{h}/live/{sg}/{fn}"})
+                                return
+
+            await asyncio.gather(*[probe_slug(sg) for sg in slugs])
+            dt = round(time.monotonic() - t0, 1)
+            self.discovery = {"last_run": {"t": time.time(), "secs": dt, "source": source,
+                                           "slugs": len(slugs), "found": len(found),
+                                           "scheduled_date": time.strftime("%F") if source == "ütemezett"
+                                           else self.discovery.get("last_run", {}).get("scheduled_date", "")},
+                              "candidates": found[:200]}
+            self.save_discovery()
+            if found:
+                names = ", ".join(f["slug"] for f in found[:8]) + ("…" if len(found) > 8 else "")
+                self.add_event("discovered", None, f"{len(found)} új csatorna-jelölt: {names} ({source})")
+            else:
+                log.info("csatorna-felderítés: nincs új jelölt (%d slug, %.1fs)", len(slugs), dt)
+            return True
+        finally:
+            self.discovery_running = False
+
+
     # ------------------------------------------------------------ élő átváltás
     async def failover(self, cid, cur_url, reason, quick=False, urgent=False, hard=False):
         """Lejátszás közbeni átváltás. A jelölteket frissen, párhuzamosan mérjük (a 12 órás
@@ -661,6 +792,13 @@ class Health:
                         await self.run("all", "measure", source="ütemezett")
                     self.last_run["scheduled_date"] = today
                     self.save()
+                # csatorna-felderítés (a napi ellenőrzés után, külön időpontban)
+                if self.cfg.discovery_enabled and not self.running and not self.discovery_running \
+                        and self.cfg.relay_list():
+                    dh, dm = [int(x) for x in self.cfg.discovery_time.split(":")]
+                    dlate = (lt.tm_hour * 60 + lt.tm_min) - (dh * 60 + dm)
+                    if 0 <= dlate <= 120 and self.discovery.get("last_run", {}).get("scheduled_date") != today:
+                        await self.discover(source="ütemezett")
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

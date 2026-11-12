@@ -33,7 +33,7 @@ from catalog import Catalog, CatalogError, extinf as cat_extinf, is_ip_url, pars
 from health import Health  # noqa: E402
 import hdhr  # noqa: E402
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 log = logging.getLogger("tsproxy")
 slog = logging.getLogger("tsproxy.stream")     # adás: indulás/leállás, forrásváltás, szegmens- és playlist-hibák
 dlog = logging.getLogger("tsproxy.diag")       # 5 mp-enkénti részletes adás-diagnosztika
@@ -160,6 +160,12 @@ def _spec():
     add("hdhr_discovery", "bool", True, g, "Automatikus felderítés: bináris TLV + szöveges (UDP 65001) és SSDP (UDP 1900)")
     add("hdhr_port80", "bool", False, g, "Port-80-as tükör: a Plex egyes útvonalai a hirdetett port helyett a 80-at kérdeznek (ehhez CAP_NET_BIND_SERVICE vagy root kell)")
     add("hdhr_name", "str", "", g, "Tuner megjelenő neve (üresen: iptv-ts-proxy@<host>)")
+    g = "Csatorna-felderítés"
+    add("discovery_enabled", "bool", False, g, "Napi automatikus új-csatorna-keresés a relay hostokon (jelöltlista az admin Ellenőrzés fülén)")
+    add("discovery_time", "time", "04:20", g, "Az automatikus felderítés időpontja (HH:MM)")
+    add("discovery_epg_names", "bool", True, g, "A forrás-EPG csatornanevei is jelölt slugok legyenek (így találja meg a katalógusból kimaradókat)")
+    add("discovery_names", "text", "", g, "Kézi jelöltlista: soronként csatornanév vagy slug, amit a relayeken kipróbál")
+    add("discovery_max", "int", 400, g, "Egy futásban legfeljebb ennyi ismeretlen jelölt-slug mérése", 10, 5000)
     g = "Statisztika"
     add("stats_enabled", "bool", True, g, "Nézettségi statisztika gyűjtése")
     add("stats_days", "int", 90, g, "Statisztika megőrzése (nap)", 7, 3650)
@@ -880,6 +886,7 @@ class App:
         self.epg_hdhr_gz = None
         self.started = time.time()
         self.epg_index = {}              # tvg-id -> [(start, stop, cím), ...] rendezve
+        self.epg_names = {}              # tvg-id -> display-name-ek (a felderítés jelöltjei)
         self.epg_stats = (0, 0)
         self.epg_used = ""
 
@@ -995,9 +1002,6 @@ class App:
     async def load_epg(self):
         t0 = time.time()
         src = self.cfg.epg_source or self.cfg.legacy_epg_url
-        if not src:
-            elog.info("epg: nincs forrás beállítva (epg_source), kihagyva")
-            return
         elog.info("epg forrás: %s", src)
         async with self.http.get(src, timeout=aiohttp.ClientTimeout(total=120)) as r:
             r.raise_for_status()
@@ -1006,7 +1010,7 @@ class App:
         # a több MB-os XMLTV feldolgozása és tömörítése külön szálon: az event loopban másodpercekre
         # megállította volna az összes futó adást (a Plex ezt elhallgatásnak veszi)
         (self.epg_index, self.epg_stats, self.epg_hdhr_xml, self.epg_hdhr_gz,
-         self.epg_xml, self.epg_gz) = await asyncio.to_thread(self._build_epg, raw, chans)
+         self.epg_xml, self.epg_gz, self.epg_names) = await asyncio.to_thread(self._build_epg, raw, chans)
         self.epg_used, self.epg_time = src, time.time()
         elog.info("epg: %d csatorna, %d műsor, %.1fs", *self.epg_stats, time.time() - t0)
 
@@ -1019,10 +1023,15 @@ class App:
         out = ET.Element("tv", root.attrib)
         n_ch = n_pr = 0
         index = {}
+        names = {}
         for el in root:
             if el.tag == "channel" and el.get("id") in keep:
                 out.append(el)
                 n_ch += 1
+                # az EPG display-name-jei a csatorna-felderítés slug-jelöltjei
+                names.setdefault(el.get("id"), []).extend(
+                    [d.text.strip() for d in el.findall("display-name")
+                     if d.text and d.text.strip() and not d.text.strip()[:1].isdigit()])
             elif el.tag == "programme" and el.get("channel") in keep:
                 out.append(el)
                 n_pr += 1
@@ -1067,7 +1076,7 @@ class App:
         gz = gzip.compress(xml)
         with open(os.path.join(self.cfg.data, "epg.xml.gz"), "wb") as f:
             f.write(gz)
-        return index, (n_ch, n_pr), hxml, hgz, xml, gz
+        return index, (n_ch, n_pr), hxml, hgz, xml, gz, names
 
     async def refresher(self):
         last_epg = time.time()

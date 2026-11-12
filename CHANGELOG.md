@@ -1,5 +1,22 @@
 # Változások
 
+## 2.3.0 – 2026-11-12
+A 2.11.0-s üzemi változás átvitele: **csatorna-felderítés**.
+
+- **Csatorna-felderítés (discovery):** a relay hostokon kipróbálja az ismeretlen jelölt-slugokat —
+  a forrás-EPG display-name-jeiből, a `<data>/discovery-slugs.txt` szólistából, a kézi
+  `discovery_names` listából és az utótag-variánsokból (`_hun/_atk/_hd/_tv_hu`) képezve. Ami
+  érvényes playlistet ad (`/live/<slug>/index.m3u8`) és nincs a katalógusban, az jelölt lesz:
+  az admin **Ellenőrzés** fülén listázódik, és **letiltva** importálható (a felhasználó
+  engedélyezi). Ütemezett futás: `discovery_enabled` (alap: ki) + `discovery_time`;
+  a találatról `discovered` esemény és webhook megy.
+- **Élő teszt:** a valós relayeken és a valódi katalógus+EPG párossal a felderítés 29 ismeretlen
+  jelölt-slugból megtalálta a katalógus URL-jeitől eltérő `m2_hun` forrást (érvényes, élő
+  MPEG-TS ellenőrizve).
+- Az induló M3U letölthetetlensége mostantól az üzemi kódban is védett (üres katalógussal
+  indul, újraindításkor újrapróbálja).
+
+
 ## 2.2.0 – 2026-11-12
 Az üzemi 2.10.1-es verzió javításainak és új funkcióinak átvitele. A disztro-specifikus
 alapértékek változatlanok (üres külső URL/EPG/relayek, `ip_only` és `write_legacy_files` ki,

@@ -267,6 +267,46 @@ def setup(A, app):
         except ValueError:
             raise web.HTTPBadRequest(text=f"{key}: egész szám kell") from None
 
+    async def h_discovery(request):
+        D = H.discovery or {}
+        return web.json_response({"running": H.discovery_running, "last_run": D.get("last_run", {}),
+                                  "slugs": D.get("slugs", 0), "candidates": D.get("candidates", []),
+                                  "next": H.next_scheduled_discovery()})
+
+    async def h_discovery_run(request):
+        if H.running or H.discovery_running:
+            return jerr("már fut egy ellenőrzés vagy felderítés", 409)
+        asyncio.create_task(H.discover(source="kézi"))
+        return web.json_response({"ok": True})
+
+    async def h_discovery_import(request):
+        d = await body(request)
+        want = {s for s in d.get("slugs", []) if isinstance(s, str)}
+
+        def slug_name(sg):
+            for suf in ("_tv_hu", "_hun", "_hu", "_atk", "_hd"):
+                if sg.endswith(suf):
+                    sg = sg[:-len(suf)]
+                    break
+            parts = [p for p in sg.replace("-", "_").split("_") if p]
+            return " ".join(p[:1].upper() + p[1:] for p in parts) or sg
+
+        added, skipped = [], []
+        for c in (H.discovery or {}).get("candidates", []):
+            if c["slug"] not in want:
+                continue
+            name = slug_name(c["slug"])
+            try:
+                ch = cat.add({"name": name, "urls": [c["url"]], "enabled": False})
+                added.append(ch["id"])
+            except CatalogError:
+                skipped.append(name)
+        if added:
+            changed()
+        alog.info("felderítés: %d csatorna importálva (letiltva)%s", len(added),
+                  f", kihagyva: {', '.join(skipped)}" if skipped else "")
+        return web.json_response({"ok": True, "added": added, "skipped": skipped})
+
     async def h_events(request):
         after = qint(request, "after", 0)
         typ = request.query.get("type", "")
@@ -432,6 +472,9 @@ def setup(A, app):
         web.post("/api/health/check/{cid}", h_health_check),
         web.get("/api/health/channel/{cid}", h_health_channel),
         web.get("/api/events", h_events),
+        web.get("/api/discovery", h_discovery),
+        web.post("/api/discovery/run", h_discovery_run),
+        web.post("/api/discovery/import", h_discovery_import),
         web.get("/api/stats", h_stats),
         web.get("/api/config", h_config_get),
         web.post("/api/config", h_config_post),

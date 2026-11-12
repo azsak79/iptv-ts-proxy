@@ -160,6 +160,13 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
       <thead><tr><th>Állapot</th><th>Csatorna</th><th>Aktív forrás</th><th class="num">Margin</th><th class="num">Források</th><th class="num">Elérhetőség</th><th>Ellenőrizve</th><th></th></tr></thead>
       <tbody id="hBody"></tbody>
     </table>
+    <div class="cfgsec"><h3>Új csatornák felderítése</h3><div class="cfg">
+      <div style="grid-column:1/-1" class="small mut">A relay hostokon kipróbálja azokat a slugokat, amik a forrás-EPG csatornaneveiből, a kézi listából és az utótag-variánsokból származnak (<code>/live/&lt;slug&gt;/index.m3u8</code>). Ami érvényes playlistet ad és nincs a katalógusban, az jelölt lesz: <b>letiltott csatornaként</b> importálható (így semmi nem indul el magától) — az engedélyezés a Csatornák fülön, egy kattintással. Ütemezés: Beállítások → Csatorna-felderítés (<code>discovery_enabled</code>).</div>
+      <div style="grid-column:1/-1"><button class="b pri" id="dRun">Felderítés most</button>
+        <button class="b" id="dImport" disabled>Kijelöltek importálása letiltott csatornaként</button>
+        <span class="mut small" id="dState"></span></div>
+      <div style="grid-column:1/-1"><table><thead><tr><th style="width:24px"></th><th>Slug</th><th>Talált név</th><th>Host</th><th class="num">Forrás</th></tr></thead><tbody id="dBody"><tr><td colspan="5" class="mut">Még nem futott.</td></tr></tbody></table></div>
+    </div></div>
     <p class="mut small">Margin = egy szegmens hossza / a letöltés ideje. 1,2 alatt „instabil” (az egykapcsolatos mérés szerint); a gyenge forrásnál a proxy párhuzamos (Range) mérést is végez, mert a lejátszás is így tölt: az effektív margin a jobbik érték. Az elérhetőség a napi ellenőrzések alapján számolt arány.</p>
   </section>
 
@@ -424,6 +431,7 @@ document.addEventListener('click',async e=>{const n=e.target.dataset?.restore; i
 // ---------------------------------------------------------------- ellenőrzés
 const ORD={halott:0,instabil:1,hatar:2,ismeretlen:3,jo:4};
 async function loadHealth(){
+  if(tab==='hlth')loadDiscovery();
   try{ const d=await api('/api/health'); const c=d.counts;
     $('#hJo').textContent=c.jo; $('#hHatar').textContent=c.hatar; $('#hInst').textContent=c.instabil; $('#hHal').textContent=c.halott; $('#hIsm').textContent=c.ismeretlen;
     const l=d.last_run||{}; $('#hLast').textContent=l.t?ago(l.t):'még nem futott'; $('#hLastS').textContent=l.t?`${l.mode} · ${l.source} · ${l.secs} mp · váltás: ${l.changed}`:'';
@@ -440,6 +448,29 @@ async function loadHealth(){
 }
 document.addEventListener('click',async e=>{const id=e.target.dataset?.edit2; if(!id)return; if(!cat.length)await loadCat(); const c=cat.find(x=>x.id===id); if(c)openEdit(c)});
 $('#hOnlyProb').onchange=loadHealth;
+
+// ------------------------------------------------- felderítés (új csatornák)
+let dSel=new Set();
+async function loadDiscovery(){
+  try{
+    const d=await api('/api/discovery');
+    $('#dRun').disabled=d.running;
+    $('#dState').textContent=d.running?'fut…':
+      (d.last_run?.t?`utolsó futás ${dt(d.last_run.t)}: ${d.last_run.slugs} slug, ${d.last_run.found} találat, ${(d.last_run.secs??0).toFixed(0)} s`:'még nem futott');
+    $('#dBody').innerHTML=(d.candidates||[]).map(c=>`<tr><td><input type="checkbox" data-s="${esc(c.slug)}" ${dSel.has(c.slug)?'checked':''}></td><td>${esc(c.slug)}</td><td class="small">${esc(c.slug.replace(/_(tv_hu|hun|hu|atk|hd)$/,'').replace(/[-_]+/g,' ').replace(/(^| )(.)/g,(m,a,b)=>b.toUpperCase()))}</td><td class="small">${esc(c.host)}</td><td class="small">${esc(c.url)}</td></tr>`).join('')||'<tr><td colspan="5" class="mut">Nincs jelölt.</td></tr>';
+  }catch(e){}
+}
+$('#dBody').addEventListener('change',e=>{
+  const s=e.target.dataset?.s; if(!s)return;
+  e.target.checked?dSel.add(s):dSel.delete(s);
+  $('#dImport').disabled=!dSel.size;
+});
+$('#dRun').onclick=async()=>{ try{ await api('/api/discovery/run',{}); toast('Felderítés indítva'); setTimeout(loadDiscovery,1500); }catch(e){ toast(e.message,1) } };
+$('#dImport').onclick=async()=>{ try{
+    const r=await api('/api/discovery/import',{slugs:[...dSel]});
+    toast(`${r.added.length} csatorna importálva letiltott csatornaként${r.skipped.length?', kihagyva: '+r.skipped.join(', '):''}`);
+    dSel.clear(); $('#dImport').disabled=true; loadHealth();
+  }catch(e){ toast(e.message,1) } };
 async function runCheck(mode){ try{ await api('/api/health/run',{mode}); toast('Ellenőrzés indítva'); loadHealth() }catch(e){toast(e.message,1)} }
 $('#hRun').onclick=()=>runCheck('measure'); $('#hQuick').onclick=()=>runCheck('quick');
 
@@ -465,7 +496,7 @@ $('#stDays').onchange=loadStats;
 // ---------------------------------------------------------------- beállítások
 function linkRows(items){
   // items: [címke, url vagy szöveg]
-  return items.filter(([,val])=>val).map(([label,val])=>{
+  return items.map(([label,val])=>{
     const isUrl=/^https?:\/\//.test(val);
     return `<div class="cfg linkrow"><label><div class="h" style="font-size:12px">${esc(label)}</div></label>
       <div style="display:flex;gap:8px;align-items:center;min-width:0">
