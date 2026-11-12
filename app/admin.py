@@ -3,6 +3,7 @@ import asyncio
 import base64
 import collections
 import hmac
+import logging
 import os
 import sys
 import time
@@ -13,9 +14,13 @@ import aiohttp
 from aiohttp import web
 
 # a már futó proxy-modul (szkriptként __main__), hogy ne töltődjön be kétszer (RING, log, SPEC stb.)
-P = sys.modules.get("proxy") or sys.modules["__main__"]
+# a __main__ élvez elsőbbséget: az ő RING-jét köti a logging be – a másolatok RING-je üres marad
+_m = sys.modules.get("__main__")
+P = _m if hasattr(_m, "RING") else sys.modules.get("proxy")
+import hdhr  # noqa: E402
 from catalog import CatalogError  # noqa: E402
 
+alog = logging.getLogger("tsproxy.admin")
 HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin.html")
 
 
@@ -63,7 +68,7 @@ def setup(A, app):
         try:
             await A.load_epg()
         except Exception as e:  # noqa: BLE001
-            P.log.warning("EPG újraolvasás hiba: %s", e)
+            alog.warning("EPG újraolvasás hiba: %s", e)
 
     async def body(request):
         try:
@@ -158,7 +163,7 @@ def setup(A, app):
     async def h_cat_delete(request):
         c = cat.delete(request.match_info["cid"])
         changed(epg=True)
-        P.log.info("csatorna törölve (admin): %s", c["name"])
+        alog.info("csatorna törölve (admin): %s", c["name"])
         return web.json_response({"ok": True})
 
     async def h_cat_reorder(request):
@@ -175,7 +180,7 @@ def setup(A, app):
         d = await body(request)
         n = cat.bulk(d.get("ids", []), d.get("action", ""), d.get("value"))
         changed(epg=True)
-        P.log.info("tömeges művelet (admin): %s, %d csatorna", d.get("action"), n)
+        alog.info("tömeges művelet (admin): %s, %d csatorna", d.get("action"), n)
         return web.json_response({"ok": True, "count": n})
 
     async def h_cat_import(request):
@@ -190,7 +195,7 @@ def setup(A, app):
                 raise CatalogError(f"az M3U nem tölthető le: {e}") from None
         rep = cat.import_m3u(text, d.get("mode", "add_new"))
         changed(epg=True)
-        P.log.info("M3U import (admin): +%d új, %d összefésült", len(rep["added"]), len(rep["merged"]))
+        alog.info("M3U import (admin): +%d új, %d összefésült", len(rep["added"]), len(rep["merged"]))
         return web.json_response({"ok": True, **rep})
 
     async def h_cat_export(request):
@@ -212,7 +217,7 @@ def setup(A, app):
     async def h_cat_restore(request):
         cat.restore((await body(request)).get("name", ""))
         changed(epg=True)
-        P.log.info("katalógus visszaállítva (admin)")
+        alog.info("katalógus visszaállítva (admin)")
         return web.json_response({"ok": True})
 
     # ------------------------------------------------------------ forrás-ellenőrzés
@@ -256,15 +261,21 @@ def setup(A, app):
             return jerr("nincs ilyen csatorna", 404)
         return web.json_response({"channel": view(c), "history": list(H.history.get(cid, []))})
 
+    def qint(request, key, default):
+        try:
+            return int(request.query.get(key, default))
+        except ValueError:
+            raise web.HTTPBadRequest(text=f"{key}: egész szám kell") from None
+
     async def h_events(request):
-        after = int(request.query.get("after", 0))
+        after = qint(request, "after", 0)
         typ = request.query.get("type", "")
         ev = [e for e in H.events if e["i"] > after and (not typ or e["type"] == typ)]
         return web.json_response({"events": ev[-300:], "last": H._ev_n})
 
     # ------------------------------------------------------------ statisztika
     async def h_stats(request):
-        days = max(1, min(int(request.query.get("days", 7)), 3650))
+        days = max(1, min(qint(request, "days", 7), 3650))
         rows = A.usage(days)
         ch, ip, day = collections.defaultdict(lambda: [0, 0, 0.0, set()]), collections.defaultdict(lambda: [0, 0, 0.0]), \
             collections.defaultdict(lambda: [0, 0])
@@ -292,10 +303,31 @@ def setup(A, app):
         })
 
     # ------------------------------------------------------------ beállítások
+    def _links(request):
+        base = A.base(request)
+        ext = (A.cfg.external_base or A.base(request) + "/tv").rstrip("/")
+        tok = A.cfg.external_token
+        ext_pl = f"{ext}/{tok}/playlist.m3u" if tok else f"{ext}/<token>/playlist.m3u"
+        ext_epg = f"{ext}/{tok}/epg.xml.gz" if tok else f"{ext}/<token>/epg.xml.gz"
+        return {
+            "internal": {"playlist": f"{base}/playlist.m3u", "epg": f"{base}/epg.xml.gz",
+                         "status": f"{base}/status"},
+            "external": {"playlist": ext_pl, "epg": ext_epg,
+                         "epg_legacy": A.cfg.legacy_epg_url},
+            "hdhr": {"tuner": f"{base}/discover.json", "lineup": f"{base}/lineup.json",
+                     "epg": f"{base}/hdhr/epg.xml",
+                     "udp": bool(A.cfg.hdhr_enabled and A.cfg.hdhr_discovery),
+                     "mirror80": bool(A.cfg.hdhr_enabled and A.cfg.hdhr_port80),
+                     "tuners": A.cfg.hdhr_tuners,
+                     "device_id": hdhr.device_id(A)},
+            "hdhr_enabled": bool(A.cfg.hdhr_enabled),
+        }
+
     async def h_config_get(request):
-        spec = {k: {kk: v[kk] for kk in ("type", "min", "max", "help", "group")} for k, v in P.SPEC.items()}
+        spec = {k: {kk: v.get(kk) for kk in ("type", "min", "max", "help", "group", "choices")} for k, v in P.SPEC.items()}
         return web.json_response({"values": {k: getattr(A.cfg, k) for k in P.SPEC}, "defaults": A.cfg.defaults,
-                                  "overrides": A.cfg.overrides, "spec": spec})
+                                  "overrides": A.cfg.overrides, "spec": spec,
+                                  "links": _links(request)})
 
     async def h_config_post(request):
         try:
@@ -312,7 +344,9 @@ def setup(A, app):
         except ValueError as e:
             return jerr(str(e))
         cat.keep = A.cfg.history_keep
-        P.log.info("beállítások módosítva (admin): %s", ", ".join(changes))
+        if any(k.startswith("log_") for k in changes):
+            P.apply_logging(A.cfg)
+        alog.info("beállítások módosítva (admin): %s", ", ".join(changes))
         if before != (A.cfg.epg_source, A.cfg.legacy_epg_url, A.cfg.ip_only):
             changed(epg=True)
         elif set(changes) & {"playlist_only_alive", "write_legacy_files"}:
@@ -331,7 +365,7 @@ def setup(A, app):
                 A.sync_channels()
         except Exception as e:  # noqa: BLE001
             return jerr(f"sikertelen: {e}", 502)
-        P.log.info("újraolvasás (admin): %s", what)
+        alog.info("újraolvasás (admin): %s", what)
         return web.json_response({"ok": True})
 
     # ------------------------------------------------------------ élő adások
@@ -342,16 +376,20 @@ def setup(A, app):
         c.session.stopped = True
         async with c.session.cond:
             c.session.cond.notify_all()
-        P.log.info("%s: leállítva (admin)", c.name)
+        alog.info("%s: leállítva (admin)", c.name)
         return web.json_response({"ok": True})
 
     async def h_kick(request):
         c = A.channels.get(request.match_info["cid"])
-        rec = c.session.client_list.get(int(request.match_info["client"])) if c and c.session else None
+        try:
+            client = int(request.match_info["client"])
+        except ValueError:
+            return jerr("érvénytelen kliens-azonosító")
+        rec = c.session.client_list.get(client) if c and c.session else None
         if not rec:
             return jerr("nincs ilyen kliens", 404)
         rec["transport"].close()
-        P.log.info("%s: kliens kirúgva (admin): %s", c.name, rec["ip"])
+        alog.info("%s: kliens kirúgva (admin): %s", c.name, rec["ip"])
         return web.json_response({"ok": True})
 
     async def h_probe(request):
@@ -361,7 +399,7 @@ def setup(A, app):
         return web.json_response(await A.deep_probe(c, 8))
 
     async def h_logs(request):
-        after = int(request.query.get("after", 0))
+        after = qint(request, "after", 0)
         lines = [x for x in P.RING.buf if x["i"] > after]
         return web.json_response({"lines": lines[-400:], "last": P.RING.n})
 

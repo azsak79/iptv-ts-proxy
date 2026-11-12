@@ -49,7 +49,7 @@ A tároló nyilvános: https://github.com/azsak79/iptv-ts-proxy. Fiók nem kell 
 **A) kiadási csomag (ajánlott):** egy kipróbált, rögzített verzió.
 ```bash
 sudo apt install -y curl         # ha nincs (Fedora: dnf install curl)
-V=2.1.0
+V=2.2.0
 curl -fLO https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz
 curl -fLO https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz.sha256
 sha256sum -c iptv-ts-proxy-$V.tar.gz.sha256
@@ -64,7 +64,7 @@ sudo apt install -y git          # ha nincs (Fedora: dnf install git)
 git clone https://github.com/azsak79/iptv-ts-proxy.git
 cd iptv-ts-proxy
 ```
-Egy adott kiadás: `git checkout v2.1.0`. Frissítésnél elég a `git pull`.
+Egy adott kiadás: `git checkout v2.2.0`. Frissítésnél elég a `git pull`.
 
 ## 3. Telepítés a varázslóval
 ```bash
@@ -99,7 +99,7 @@ Mit csinál ezután:
 
 Példa a záró kimenetre:
 ```
-iptv-ts-proxy 2.1.0 telepítve
+iptv-ts-proxy 2.2.0 telepítve
   Admin felület:  http://192.168.1.50:8095/admin   (felhasználónév: bármi)
   Admin jelszó:   Xy3…   (generált; később: sudo grep PASSWORD /etc/iptv-ts-proxy/iptv-ts-proxy.env)
   Playlist (M3U): http://192.168.1.50:8095/playlist.m3u

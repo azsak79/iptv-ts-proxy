@@ -8,15 +8,18 @@ A régi pipeline `best.py` + `refresh.py check_quick` logikájának átvétele (
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import time
+import unicodedata
 from collections import deque
 from contextlib import asynccontextmanager
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+log = logging.getLogger("tsproxy.health")
 PROBE_UA = "Mozilla/5.0"
 SEG_SIZE_CAP = 12 << 20
 MIN_SEG_BYTES = 200_000
@@ -37,9 +40,27 @@ def eff(r):
     return max(r.get("margin") or 0.0, r.get("pmargin") or 0.0)
 
 
-def slug_of(url):
-    m = re.match(r"^/live/([^/]+)/(?:index\.m3u8)?$", urlsplit(url).path)
-    return m.group(1) if m else None
+def slug_and_file(url):
+    """`/live/<slug>/<index|playlist>.m3u8` -> (slug, fájlnév); egyébként (None, None).
+
+    A fájlnév is kell, hogy a jelölt ugyanazt az alakot használja a többi hoston
+    (a `playlist.m3u8`-as forrásoknak eddig nem volt cross-host jelöltje).
+    """
+    m = re.match(r"^/live/([^/]+)(?:/(index\.m3u8|playlist\.m3u8))?$", urlsplit(url).path)
+    if not m:
+        return None, None
+    return m.group(1), (m.group(2) or "index.m3u8")
+
+
+def _asc_slug(s):
+    """Névtöredék -> kisbetűs, ASCII, aláhúzásos slug-jelölt (Spíler1.TV.hu -> spiler1_tv_hu)."""
+    s = unicodedata.normalize("NFKD", s or "")
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r"[^a-z0-9]+", "_", s.lower())
+    return re.sub(r"_+", "_", s).strip("_")
+
+
+SLUG_SUFFIXES = ("_hun", "_hu", "_atk", "_hd", "_tv_hu")
 
 
 class Health:
@@ -76,7 +97,7 @@ class Health:
         except FileNotFoundError:
             pass
         except Exception as e:  # noqa: BLE001
-            self.A.log.warning("health.json hibás, kihagyva: %s", e)
+            log.warning("health.json hibás, kihagyva: %s", e)
         try:
             with open(self._path("events.jsonl"), encoding="utf-8") as f:
                 for line in f.readlines()[-1000:]:
@@ -108,7 +129,7 @@ class Health:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         except OSError:
             pass
-        self.A.log.info("esemény: %s %s %s", typ, ev["name"], detail)
+        log.info("esemény: %s %s %s", typ, ev["name"], detail)
         self.A.notify(ev)
 
     # ------------------------------------------------------------ állapot-lekérdezések
@@ -168,7 +189,8 @@ class Health:
         to = self.cfg.probe_timeout
         async with self._polite(urlsplit(url).netloc):
             async with self.A.http.get(url, headers={"User-Agent": PROBE_UA},
-                                       timeout=aiohttp.ClientTimeout(total=to)) as r:
+                                       timeout=aiohttp.ClientTimeout(total=to,
+                                                                     sock_connect=self.cfg.probe_connect)) as r:
                 if r.status >= 400:
                     raise HTTPError(r.status)
                 body = bytearray()
@@ -252,7 +274,7 @@ class Health:
                     t_start = time.monotonic()       # a sorbanállás után indul az időmérés
                     async with self.A.http.get(
                             seg_url, headers={"User-Agent": PROBE_UA},
-                            timeout=aiohttp.ClientTimeout(total=None, sock_connect=self.cfg.probe_timeout,
+                            timeout=aiohttp.ClientTimeout(total=None, sock_connect=self.cfg.probe_connect,
                                                           sock_read=self.cfg.probe_timeout)) as r:
                         if r.status >= 400:
                             raise HTTPError(r.status)
@@ -289,7 +311,7 @@ class Health:
         """Ugyanaz a szegmens párhuzamos Range-részekben (ahogy a proxy tölti): effektív margin."""
         chunk = self.cfg.range_chunk if self.cfg.range_chunk >= 65536 else 262144
         cap = self.cfg.seg_time_cap + 4
-        tmo = aiohttp.ClientTimeout(total=cap, sock_connect=self.cfg.probe_timeout)
+        tmo = aiohttp.ClientTimeout(total=cap, sock_connect=self.cfg.probe_connect)
         conc = asyncio.Semaphore(max(1, min(self.cfg.range_conc, 8)))
 
         async def part(a, b):
@@ -319,28 +341,104 @@ class Health:
         return round(seg_dur / dt, 2)
 
     # ------------------------------------------------------------ jelöltek, rangsor
+    def slug_variants(self, ch):
+        """Minden lehetséges slug-változat a csatornához: a katalógus-URL-ek slugjai,
+        név/tvg_id alapú jelöltek és az utótag-variánsok (_hun/_atk/_hd levétele, hozzáadása).
+        A provider relay-IP-nként eltérő slugot használhat, ezért minden változatot
+        megpróbálunk minden relay hoston (a `slug_variants_max` korlátig)."""
+        seen, out = set(), []
+
+        def add(s):
+            s = _asc_slug(s)
+            if s and 2 <= len(s) <= 60 and s not in seen:
+                seen.add(s)
+                out.append(s)
+
+        for u in ch.get("urls") or []:
+            add(slug_and_file(u)[0])
+        add(ch.get("tvg_id") or "")
+        add((ch.get("tvg_id") or "").split(".")[0])
+        add(ch.get("name") or "")
+        for s in list(out):                      # utótag-variánsok a meglévőkre
+            core = s
+            for suf in SLUG_SUFFIXES:
+                if core.endswith(suf):
+                    core = core[:-len(suf)]
+                    break
+            if core and core != s:
+                add(core)
+                for suf in ("_hun", "_atk", "_hd"):
+                    if not core.endswith(suf):
+                        add(core + suf)
+        return out[:max(1, self.cfg.slug_variants_max)]
+
     def candidates(self, ch):
-        """Aktuális (nem letiltott) URL-ek + ugyanazon slug a többi relay hoston."""
+        """Aktuális (nem letiltott) URL-ek + ugyanazon slug és fájlnév a többi relay hoston
+        + minden slug-változat minden relay hoston (a provider IP-nként eltérő slugot használhat)."""
         meta = ch.get("url_meta") or {}
         out = []
+
+        def add(u):
+            if u and u not in out:
+                out.append(u)
+
+        files = []
         for u in ch.get("urls") or []:
             if (meta.get(u) or {}).get("disabled"):
                 continue
-            if u not in out:
-                out.append(u)
-            s = slug_of(u)
+            add(u)
+            s, fn = slug_and_file(u)
+            if fn and fn not in files:
+                files.append(fn)
             if s and self.cfg.auto_candidates:
                 for h in self.cfg.relay_list():
-                    cand = f"{h}/live/{s}/index.m3u8"
-                    if cand not in out:
-                        out.append(cand)
+                    add(f"{h}/live/{s}/{fn}")
+        if self.cfg.auto_candidates and self.cfg.slug_variants:
+            for s in self.slug_variants(ch):
+                for fn in (files or ["index.m3u8"]):
+                    for h in self.cfg.relay_list():
+                        add(f"{h}/live/{s}/{fn}")
         return out
 
-    def rank(self, results):
+    def failover_candidates(self, ch, cur_url):
+        """Átváltási jelöltek prioritással: 1) ugyanazon slug (+ fájl) a többi relay hoston,
+        2) slug/fájl-változatok minden hoston, 3) a csatorna további saját URL-jei.
+        Legfeljebb `failover_candidates` darab (az azonos slug a másik IP-n a legvalószínűbb javítás)."""
+        out = []
+
+        def add(u):
+            if u and u != cur_url and u not in out:
+                out.append(u)
+
+        slugs, files = [], []
+        for u in ch.get("urls") or []:
+            s, fn = slug_and_file(u)
+            if s and s not in slugs:
+                slugs.append(s)
+            if fn and fn not in files:
+                files.append(fn)
+        s0 = slug_and_file(cur_url)[0] or (slugs[0] if slugs else None)
+        if self.cfg.auto_candidates and s0:
+            for fn in (files or ["index.m3u8"]):
+                for h in self.cfg.relay_list():
+                    add(f"{h}/live/{s0}/{fn}")
+            if self.cfg.slug_variants:
+                for s in self.slug_variants(ch):
+                    for fn in (files or ["index.m3u8"]):
+                        for h in self.cfg.relay_list():
+                            add(f"{h}/live/{s}/{fn}")
+        for u in ch.get("urls") or []:
+            add(u)
+        return out[:max(1, self.cfg.failover_candidates)]
+
+    def rank(self, results, prefer=None):
+        """Legjobb mért forrás. `prefer` = előnyben részesített slugok: enyhén (5%) nagyobb
+        effektív margint kapnak, hogy a mérési zaj ne a spekulatív slug-változat javára döntsön."""
         ok = [r for r in results if r.get("ok") and eff(r) >= self.cfg.min_margin]
         if not ok:
             return None
-        ok.sort(key=lambda r: (-eff(r), r.get("connect_ms") or 9999))
+        ok.sort(key=lambda r: (-eff(r) * (1.05 if slug_and_file(r["url"])[0] in (prefer or ()) else 1.0),
+                               r.get("connect_ms") or 9999))
         return ok[0]
 
     def classify(self, results):
@@ -371,14 +469,23 @@ class Health:
                 want = set(ids or [])
                 chans = [c for c in A.catalog.channels if c["id"] in want]
             self.progress = {"done": 0, "total": len(chans), "mode": mode, "started": time.time(), "source": source}
-            A.log.info("forrás-ellenőrzés indul (%s, %s): %d csatorna", mode, source, len(chans))
+            log.info("forrás-ellenőrzés indul (%s, %s): %d csatorna", mode, source, len(chans))
             sem = asyncio.Semaphore(max(1, self.cfg.check_workers))
             out = {}
 
             async def work(c):
                 async with sem:
                     res = []
+                    cache = self.results.get(c["id"]) or {}
+                    reuse_s = max(0, self.cfg.probe_reuse) * 3600
+                    now = time.time()
                     for u in self.candidates(c):
+                        old = cache.get(u)
+                        # friss, sikeres mérést nem mérünk újra (a slug-mátrix így nem nő meg napról napra);
+                        # a hibákat viszont mindig újramérjük, hogy a visszatérést észrevegyük
+                        if reuse_s and old and old.get("ok") and now - old.get("t", 0) < reuse_s:
+                            res.append(old)
+                            continue
                         res.append(await self.probe(u, measure=(mode != "quick")))
                     out[c["id"]] = res
                     self.progress["done"] += 1
@@ -428,7 +535,8 @@ class Health:
                 self.add_event("recovered", c, "újra elérhető")
             if mode == "quick" or c.get("pin"):
                 continue
-            best = self.rank(res)
+            prefer = {s for s, _ in (slug_and_file(u) for u in c.get("urls") or []) if s}
+            best = self.rank(res, prefer=prefer)
             if not best:
                 continue
             urls = list(c.get("urls") or [])
@@ -448,31 +556,87 @@ class Health:
         return changes
 
     # ------------------------------------------------------------ élő átváltás
-    async def failover(self, cid, cur_url, reason):
+    async def failover(self, cid, cur_url, reason, quick=False, urgent=False, hard=False):
+        """Lejátszás közbeni átváltás. A jelölteket frissen, párhuzamosan mérjük (a 12 órás
+        gyorsítótár halott relay-re is átkapcsolt), a cooldown csak a SIKERES váltást
+        indítja el — a sikertelen kísérlet után `failover_retry` múlva szabad az újrapróbálkozás.
+        `quick=True` (első kapcsolódás vészforgalma): csak a lejátszási lista érvényességét
+        nézi (nem mér margin-t), és az első működő jelöltre vált — másodpercek alatt.
+        `urgent=True` a sikertelen-kísérlet várakozást is elengedi (a néző 30 mp-es ablaka
+        miatt minden próbálkozásnak szabad azonnal lennie; a SIKER-cooldown érvényes marad).
+        `hard=True`: a jelenlegi forrás teljesen halott (playlist-hibák / nincs új szegmens) – ekkor a
+        siker-cooldown helyett csak a `failover_retry` várakozás él: a cooldown a jól működő források
+        közti ide-oda váltást hivatott megakadályozni, nem azt, hogy egy halott forráson ragadjunk."""
         A, cfg = self.A, self.cfg
         ch = A.catalog.get(cid)
         if not ch or not cfg.failover_enabled:
             return None
         now = time.time()
-        if now - self.last_failover.get(cid, 0) < cfg.failover_cooldown:
-            return None
-        self.last_failover[cid] = now
+        lf = self.last_failover.get(cid) or {}
+        if not (urgent and not lf.get("ok")):
+            wait = cfg.failover_cooldown if lf.get("ok") and not hard else cfg.failover_retry
+            if now - lf.get("t", 0) < wait:
+                if not lf.get("blocked_logged"):
+                    lf["blocked_logged"] = True
+                    log.info("%s: átváltás várakozik (%s, még %d mp)", ch["name"], reason,
+                             wait - (now - lf.get("t", 0)))
+                return None
         if ch.get("pin"):
             self.add_event("failover_blocked", ch, "rögzített forrás, nem váltok")
             return None
-        res = []
-        for u in [x for x in self.candidates(ch) if x != cur_url][:6]:
+        cands = self.failover_candidates(ch, cur_url)
+        if hard and cur_url:
+            # a halott (nem válaszoló) host többi slug-változata csak időkorlátokat gyűjtene
+            dead = urlsplit(cur_url).netloc
+            cands = [u for u in cands if urlsplit(u).netloc != dead] or cands
+        wsem = asyncio.Semaphore(max(1, cfg.failover_workers))
+
+        async def measure(u):
             r = (self.results.get(cid) or {}).get(u)
-            if not r or now - r.get("t", 0) > 12 * 3600 or not r.get("quick_ok"):
-                r = await self.probe(u, measure=True)
-                self.results.setdefault(cid, {})[u] = r
-            res.append(r)
-        best = self.rank(res) or next((r for r in res if r.get("quick_ok")), None)
+            # csak a Friss eredmény fogadható el cache-ből: régebbi a host azóta meghalhatott
+            if r and r.get("quick_ok") and time.time() - r.get("t", 0) < cfg.failover_fresh:
+                return r
+            async with wsem:
+                r = await self.probe(u, measure=not quick)
+            self.results.setdefault(cid, {})[u] = r
+            return r
+
+        s0 = slug_and_file(cur_url)[0]
+
+        def good(r):
+            # korai elfogadás: azonos slug (másik relay), és működik – a többi jelöltet nem várjuk ki
+            if slug_and_file(r["url"])[0] != s0:
+                return False
+            return r.get("quick_ok") if quick else (r.get("ok") and eff(r) >= cfg.min_margin)
+
+        tasks = [asyncio.create_task(measure(u)) for u in cands]
+        best = None
+        try:
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    r = await fut
+                except Exception:  # noqa: BLE001
+                    continue
+                if good(r):
+                    best = r
+                    break
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+        if best is None:
+            res = [t.result() for t in tasks if t.done() and not t.cancelled() and not t.exception()]
+            if quick:
+                best = next((r for r in res if r.get("quick_ok")), None)
+            else:
+                best = self.rank(res, prefer={s0} if s0 else None) or next((r for r in res if r.get("quick_ok")), None)
         if not best:
+            self.last_failover[cid] = {"t": now, "ok": False}
             self.add_event("failover_failed", ch, f"nincs használható másik forrás ({reason})")
             return None
         urls = [best["url"]] + [u for u in ch.get("urls", []) if u != best["url"]]
         A.catalog.set_urls(cid, urls, "failover")
+        self.last_failover[cid] = {"t": time.time(), "ok": True}
         self.add_event("failover", ch, f"{reason}: {urlsplit(cur_url).netloc if cur_url else '–'} → "
                        f"{urlsplit(best['url']).netloc}")
         self.save()
@@ -500,4 +664,4 @@ class Health:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                self.A.log.warning("ütemező hiba: %s", e)
+                log.warning("ütemező hiba: %s", e)

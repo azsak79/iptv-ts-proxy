@@ -79,7 +79,7 @@ Követelmény: Linux **systemd**-del, **Python ≥ 3.9**, internet a telepítés
 csomagokat (`python3`, `python3-venv`, `ca-certificates`, `whiptail`) a telepítő felteszi.
 
 ```bash
-V=2.1.0
+V=2.2.0
 curl -fL https://github.com/azsak79/iptv-ts-proxy/releases/download/v$V/iptv-ts-proxy-$V.tar.gz | tar xz
 cd iptv-ts-proxy-$V
 sudo ./install.sh
@@ -188,6 +188,19 @@ beállítások az admin felületen azonnal érvényesek, újraindítás nem kell
 | `playlist_only_alive` | be | a playlistben csak az elérhető csatornák |
 | `ip_only` | ki | csak IP-címes forrás-URL használható (egyes szolgáltatóknál a domaines URL lassabb) |
 | `write_legacy_files` | ki | régi pipeline-kompatibilis fájlok írása (csak `TSP_PIPELINE_DIR` mellett) |
+| *Forrás-ellenőrzés és átváltás* | | |
+| `slug_variants` / `slug_variants_max` | be / 6 | slug-változatok mérése minden relay hoston (a szolgáltató IP-nként eltérő slugot használhat) |
+| `probe_reuse` / `probe_connect` | 12 óra / 4 mp | friss sikeres mérés újrahasznosítása / gyors kapcsolódási időkorlát |
+| `failover_candidates` / `failover_workers` / `failover_fresh` | 24 / 4 / 600 mp | átváltási jelöltek száma / párhuzamossága / cache-frissessége |
+| *HDHomeRun-tuner (Plex)* | | |
+| `hdhr_enabled` / `hdhr_discovery` | be / be | HDHomeRun-emuláció (Plex Élő TV/DVR) / felderítés: bináris TLV + SSDP (UDP 65001, 1900) |
+| `hdhr_port80` / `hdhr_tuners` / `hdhr_name` | ki / 16 / üres | port-80-as tükör (CAP_NET_BIND_SERVICE kell hozzá) / jelentett tunerek / megjelenő név |
+| *Naplózás* | | |
+| `log_enabled` | be | naplózás be/ki (journal és a Napló fül) |
+| `log_level` | `INFO` | legalacsonyabb naplózott szint: DEBUG / INFO / WARNING / ERROR |
+| `log_stream` / `log_health` / `log_access` | be | adások / ellenőrzés és események / HTTP hozzáférés |
+| `log_hdhr` / `log_epg` / `log_admin` | be | Plex-felderítés / EPG / admin műveletek |
+| `log_diag` | **ki** | 5 mp-enkénti adás-diagnosztika (csak hibakereséshez) |
 | `history_keep` | 60 | katalógus-mentések száma |
 | *Forrás-ellenőrzés* | | |
 | `check_enabled` | be | napi automatikus ellenőrzés |
@@ -280,6 +293,26 @@ Típusok: `dead`, `recovered`, `switched`, `failover`, `failover_failed`, `failo
 `check_done`. Home Assistantban egy webhook-triggeres automatizmus fogadja
 (`https://<ha>/api/webhook/<webhook_id>`).
 
+## 11b. HDHomeRun-tuner (Plex)
+
+A proxy **HDHomeRun-tunerként** is elérhető, így a Plex (Plex Pass) natívan, M3U-tuner
+megkerülésével használja: Élő TV + DVR, automatikus felderítéssel.
+
+| Végpont | Mi |
+|---|---|
+| `/discover.json` | eszközinformáció (DeviceID, TunerCount = `hdhr_tuners`) |
+| `/lineup.json` | csatornák: `GuideNumber` = katalógus `chno`, stream = `/ch/<id>.ts` |
+| `/hdhr/epg.xml(.gz)` | XMLTV guide: csatorna-id = csatornaszám |
+| UDP 65001 / 1900 | bináris TLV-felderítés és SSDP (`hdhr_discovery`) |
+
+Plexben: Beállítások → Élő TV és DVR → a tuner magától megtalálja, vagy kézzel
+`<IP>:8095` (porttal!). Guide-nak a `/hdhr/epg.xml` adható meg.
+
+**Tapasztalatok éles használatból:** az Élő TV lejátszásához a Plex **átkódolása be** kell
+legyen kapcsolva; a minőség-beállítás kliensenkénti (gyenge TV-kliensen a Direct Play
+kényszerítése a legjobb). A `Unable to find title for item of type 5` és az üres
+`Unknown metadata type:` sorok a Plex naplójában ártalmatlan belső üzenetek.
+
 ## 12. JSON API
 Minden végpont `/api/…` alatt van, Basic auth-tal. A POST-hoz `Content-Type: application/json`
 kell (CSRF-védelem).
@@ -346,12 +379,17 @@ curl -u x:JELSZÓ -H 'Content-Type: application/json' -d '{"mode":"measure"}' ht
 ```
 app/            proxy.py (HLS→TS, végpontok, életciklus), catalog.py, health.py, admin.py, admin.html
 install.sh      telepítő varázsló
-tests/          e2e.sh (végponttól végpontig, root nélkül), fake_upstream.py (hamis HLS-szolgáltató)
+tests/          e2e.sh (végponttól végpontig, root nélkül), fake_upstream.py (hamis HLS-szolgáltató),
+                mock_relay.py + run_scenarios.py (8 hibaforgatókönyv: kiesés, lefagyás, IP-váltás),
+                ts_check.py (TS-folytonosság), ffmpeg_check.py (valódi dekódolás)
 docs/           TELEPITES.md
 make-release.sh kiadási csomag: dist/iptv-ts-proxy-<verzió>.tar.gz + .sha256
 ```
 ```bash
 tests/e2e.sh        # staging telepítés (--root), indítás, stream/EPG/auth/token, frissítés, eltávolítás
+tests/run_scenarios.py   # 8 hibaforgatókönyv mock relayeken: TS-folytonosság, IP-váltás, failover
+tests/ts_check.py <url> --mbps 3   # egy folyamon: szegmens-sorrend, lyukak, elakadások
+tests/ffmpeg_check.py <url> --secs 45  # dekódolás: első kép, figyelmeztetések
 ./make-release.sh   # tiszta git munkakönyvtárból
 ```
 Helyi futtatás telepítés nélkül:

@@ -417,7 +417,7 @@ class Catalog:
         return json.dumps({"updated": self.updated, "channels": self._dump_channels()}, ensure_ascii=False, indent=1)
 
     def export_m3u(self, chans, title, epg_url, direct=True, logo_for=None, url_for=None):
-        lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U", f"#PLAYLIST:{title}"]
+        lines = [f'#EXTM3U x-tvg-url="{epg_url}"', f"#PLAYLIST:{title}"]
         for c in chans:
             lg = logo_for(c) if logo_for else None
             lines.append(extinf(c, lg))

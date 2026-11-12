@@ -187,14 +187,17 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
   <!-- ======================= Beállítások ======================= -->
   <section class="tab" id="cfg">
     <p class="mut small">A módosítások azonnal élnek (a futó adások a következő indításkor veszik át), és a <code>settings.json</code>-ba mentődnek – újraindítás után is megmaradnak. A sárga jelölés az alapértéktől eltérő beállítás.</p>
+    <div id="cfgLinks"></div>
     <div id="cfgForm"></div>
     <div><button class="b pri" id="cfgSave">Mentés</button></div>
   </section>
 
   <!-- ======================= Napló ======================= -->
   <section class="tab" id="log">
-    <div class="bar"><select id="lvl"><option value="">Minden szint</option><option>WARNING</option><option>ERROR</option></select>
-      <label class="small mut"><input type="checkbox" id="follow" checked> követés</label></div>
+    <div class="bar"><select id="lvl"><option value="">Minden szint</option><option value="INFO">INFO és felette</option><option value="WARNING">WARNING és felette</option><option value="ERROR">ERROR</option></select>
+      <select id="lcat"><option value="">Minden kategória</option><option value="core">core (indulás, katalógus)</option><option value="stream">stream (adások)</option><option value="health">health (ellenőrzés, átváltás)</option><option value="access">access (HTTP)</option><option value="hdhr">hdhr (Plex felderítés)</option><option value="epg">epg</option><option value="admin">admin</option><option value="diag">diag (részletes)</option></select>
+      <label class="small mut"><input type="checkbox" id="follow" checked> követés</label>
+      <span class="small mut">Mit és milyen szinten naplózzon: Beállítások → Naplózás.</span></div>
     <div class="logbox" id="logBox"></div>
   </section>
 </main>
@@ -460,6 +463,48 @@ async function loadStats(){
 $('#stDays').onchange=loadStats;
 
 // ---------------------------------------------------------------- beállítások
+function linkRows(items){
+  // items: [címke, url vagy szöveg]
+  return items.filter(([,val])=>val).map(([label,val])=>{
+    const isUrl=/^https?:\/\//.test(val);
+    return `<div class="cfg linkrow"><label><div class="h" style="font-size:12px">${esc(label)}</div></label>
+      <div style="display:flex;gap:8px;align-items:center;min-width:0">
+        ${isUrl?`<a class="b" href="${esc(val)}" target="_blank" rel="noopener" style="max-width:560px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(val)}</a>`
+               :`<span class="b" style="cursor:default">${esc(val)}</span>`}
+        <button class="b" data-copy="${esc(val)}">másol</button>
+      </div></div>`;
+  }).join('');
+}
+async function loadCfgLinks(){
+  try{
+    const L=(await api('/api/config')).links;
+    const hdhrOn=L.hdhr_enabled;
+    $('#cfgLinks').innerHTML=`
+      <div class="cfgsec"><h3>Linkek</h3><div class="cfg">
+        <div style="grid-column:1/-1" class="small mut">Belső (LAN): a néhány sorral lejjebb lévő kliensekhez (Kodi, Jellyfin M3U, Plex HDHomeRun, VLC). Külső: Cloudflare-en át, tokenes – bármilyen hálózatról.</div>
+        ${linkRows([['Belső M3U (playlist)',L.internal.playlist],['Belső EPG (XMLTV)',L.internal.epg]])}
+        ${linkRows([['Külső M3U (playlist)',L.external.playlist],['Külső EPG (XMLTV)',L.external.epg]])}
+        ${linkRows([['Külső EPG (rég pipeline, névalapú)',L.external.epg_legacy]])}
+      </div></div>
+      <div class="cfgsec"><h3>HDHomeRun-tuner (Plex)</h3><div class="cfg">
+        <div style="grid-column:1/-1" class="small mut">${hdhrOn?'A proxy HDHomeRun-tunerként elérhető – a Plex Élő TV és DVR-jében magától megtalálja (a Plex-szerver újraindítása után is érdemes újrapróbálni, mert a tunert gyorsítótárazza).':'A HDHomeRun-emuláció kikapcsolva (<code>hdhr_enabled</code>).'} Élő TV és DVR <b>Plex Pass</b>hoz kötött funkció.</div>
+        ${hdhrOn?linkRows([
+          ['Tuner címe (Plexben ezt add meg)',L.hdhr.tuner],
+          ['HDHomeRun lineup',L.hdhr.lineup],
+          ['Guide XMLTV (a Plexbe ezt add meg)',L.hdhr.epg],
+          ['Felderítés: UDP 65001 + SSDP 1900',L.hdhr.udp?'bekapcsolva':'kikapcsolva (hdhr_discovery)'],
+          ['Port-80 tükör',L.hdhr.mirror80?'bekapcsolva':'kikapcsolva (hdhr_port80)'],
+          ['Jelentett párhuzamos tunerek',String(L.hdhr.tuners)],
+          ['Eszközazonosító (DeviceID)',L.hdhr.device_id],
+        ]):''}
+      </div></div>`;
+  }catch(e){/* a links mező hiánya (régi szerver) nem hiba */}
+}
+document.addEventListener('click',async e=>{
+  const c=e.target.dataset?.copy; if(!c)return;
+  try{await navigator.clipboard.writeText(c);toast('Vágólapra másolva')}catch(err){
+    const t=document.createElement('textarea');t.value=c;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();toast('Vágólapra másolva')}
+});
 async function loadCfg(){
   try{ cfgState=await api('/api/config'); const f=$('#cfgForm'); f.innerHTML=''; const gs={};
     for(const [k,sp] of Object.entries(cfgState.spec)) (gs[sp.group]??=[]).push(k);
@@ -468,12 +513,14 @@ async function loadCfg(){
       for(const k of keys){ const sp=cfgState.spec[k], v=cfgState.values[k], mod=k in cfgState.overrides;
         let inp; if(sp.type==='bool') inp=`<input type="checkbox" id="cf-${k}" data-k="${k}" ${v?'checked':''}>`;
         else if(sp.type==='text') inp=`<textarea id="cf-${k}" data-k="${k}">${esc(v)}</textarea>`;
+        else if(sp.type==='choice') inp=`<select id="cf-${k}" data-k="${k}">${(sp.choices||[]).map(o=>`<option ${o===v?'selected':''}>${esc(o)}</option>`).join('')}</select>`;
         else if(sp.type==='time') inp=`<input type="time" id="cf-${k}" data-k="${k}" value="${esc(v)}">`;
         else if(sp.type==='int'||sp.type==='float') inp=`<input type="number" id="cf-${k}" data-k="${k}" value="${esc(v)}" step="${sp.type==='float'?'0.1':'1'}">`;
         else inp=`<input type="text" id="cf-${k}" data-k="${k}" value="${esc(v)}">`;
         h+=`<label for="cf-${k}">${esc(k)}${mod?'<span class="mod">módosítva</span>':''}<div class="h">${esc(sp.help)}${(sp.type==='int'||sp.type==='float')&&sp.min!=null?` (${sp.min}–${sp.max})`:''}</div></label>
           <div>${inp}${mod?` <button class="b" data-reset="${k}" title="Alapérték: ${esc(cfgState.defaults[k])}">alap</button>`:''}</div>`; }
       f.insertAdjacentHTML('beforeend',h+'</div></div>'); }
+    loadCfgLinks();
   }catch(e){toast(e.message,1)}
 }
 $('#cfgSave').onclick=async()=>{
@@ -490,11 +537,12 @@ async function pollLogs(){
   try{ const r=await api('/api/logs?after='+logLast); if(r.lines.length){logLines=logLines.concat(r.lines).slice(-800);logLast=r.last;renderLogs()} }catch(e){}
 }
 function renderLogs(){
-  const lv=$('#lvl').value, b=$('#logBox'); const stick=$('#follow').checked;
-  b.innerHTML=logLines.filter(l=>!lv||l.lvl===lv||(lv==='WARNING'&&l.lvl==='ERROR')).map(l=>`<div class="${l.lvl}"><span class="t">${new Date(l.t*1000).toLocaleTimeString('hu')}</span> ${esc(l.msg)}</div>`).join('');
+  const LV={DEBUG:10,INFO:20,WARNING:30,ERROR:40,CRITICAL:50};
+  const lv=$('#lvl').value, lc=$('#lcat').value, b=$('#logBox'); const stick=$('#follow').checked;
+  b.innerHTML=logLines.filter(l=>(!lv||(LV[l.lvl]||0)>=LV[lv])&&(!lc||l.cat===lc)).map(l=>`<div class="${l.lvl}"><span class="t">${new Date(l.t*1000).toLocaleTimeString('hu')}</span> <span class="t">[${esc(l.cat||'')}]</span> ${esc(l.msg)}</div>`).join('');
   if(stick)b.scrollTop=b.scrollHeight;
 }
-$('#lvl').onchange=renderLogs;
+$('#lvl').onchange=renderLogs; $('#lcat').onchange=renderLogs;
 
 setInterval(()=>{ if(document.hidden)return; if(tab==='dash')pollStatus(); if(tab==='log')pollLogs(); if(tab==='hlth')loadHealth(); if(tab==='evt')loadEvents(); },3000);
 setInterval(()=>{ if(!document.hidden&&tab==='chan'&&!probing&&!$('#dEdit').open&&!document.activeElement.matches('input,textarea'))loadCat(); },20000);

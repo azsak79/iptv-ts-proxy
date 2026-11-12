@@ -9,6 +9,7 @@ ugyanebben a folyamatban él; az admin felület a /admin címen érhető el.
 import argparse
 import asyncio
 import calendar
+import copy
 import datetime
 import gzip
 import hashlib
@@ -30,11 +31,27 @@ from aiohttp import web
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # -I módban nincs a path-on
 from catalog import Catalog, CatalogError, extinf as cat_extinf, is_ip_url, parse_m3u as cat_parse_m3u  # noqa: E402
 from health import Health  # noqa: E402
+import hdhr  # noqa: E402
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 log = logging.getLogger("tsproxy")
+slog = logging.getLogger("tsproxy.stream")     # adás: indulás/leállás, forrásváltás, szegmens- és playlist-hibák
+dlog = logging.getLogger("tsproxy.diag")       # 5 mp-enkénti részletes adás-diagnosztika
+elog = logging.getLogger("tsproxy.epg")
 UA = "VLC/3.0.20 LibVLC/3.0.20"
 DEFAULT_RELAYS = ""
+
+# naplókategóriák: logger-név utótag -> leírás (a beállításokban log_<kategória> kapcsolja)
+LOG_CATS = {
+    "stream": "Adások: indulás, leállás, forrásváltás, kliens-ugrás",
+    "health": "Forrás-ellenőrzés és események (kiesés, visszatérés, átváltás)",
+    "access": "HTTP hozzáférés-napló (az /api és /admin kérések nélkül)",
+    "hdhr": "HDHomeRun / SSDP felderítés (Plex)",
+    "epg": "EPG betöltés és frissítés",
+    "admin": "Admin műveletek (szerkesztés, beállítás, import)",
+    "diag": "Részletes adás-diagnosztika 5 mp-enként (pacer, kliens-bájtok) – csak hibakereséshez",
+}
+LOG_LEVELS = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
 
 
 class RingHandler(logging.Handler):
@@ -47,10 +64,23 @@ class RingHandler(logging.Handler):
 
     def emit(self, rec):
         self.n += 1
-        self.buf.append({"i": self.n, "t": rec.created, "lvl": rec.levelname, "msg": rec.getMessage()})
+        cat = rec.name[8:] if rec.name.startswith("tsproxy.") else ("core" if rec.name == "tsproxy" else rec.name)
+        self.buf.append({"i": self.n, "t": rec.created, "lvl": rec.levelname, "cat": cat, "msg": rec.getMessage()})
 
 
 RING = RingHandler()
+
+
+def apply_logging(cfg):
+    """A naplózási beállítások élő alkalmazása a loggerek szintjén (a kikapcsolt kategória
+    üzenetei meg sem formázódnak). Kikapcsolt kategóriában a WARNING és ERROR továbbra is
+    megjelenik – kivéve, ha a naplózás teljesen ki van kapcsolva (log_enabled = ki)."""
+    lvl = LOG_LEVELS.get(cfg.log_level, logging.INFO) if cfg.log_enabled else logging.CRITICAL + 10
+    logging.getLogger().setLevel(lvl)
+    log.setLevel(lvl)
+    for cat in LOG_CATS:
+        on = getattr(cfg, "log_" + cat, True)
+        logging.getLogger("tsproxy." + cat).setLevel(lvl if on else max(lvl, logging.WARNING))
 
 
 def xmltv_ts(s):
@@ -67,9 +97,9 @@ def xmltv_ts(s):
 def _spec():
     S = {}
 
-    def add(name, typ, default, group, help, lo=None, hi=None, env=None):
+    def add(name, typ, default, group, help, lo=None, hi=None, env=None, choices=None):
         S[name] = {"type": typ, "default": default, "group": group, "help": help, "min": lo, "max": hi,
-                   "env": env or ("TSP_" + name.upper())}
+                   "env": env or ("TSP_" + name.upper()), "choices": choices}
 
     g = "Hálózat és külső elérés"
     add("external_base", "str", "", g, "Külső URL-előtag a /tv/ végpontokhoz (token nélkül, pl. https://tv.example.com/tv; üresen: a kérés címe + /tv)")
@@ -78,11 +108,12 @@ def _spec():
     add("max_sessions", "int", 0, g, "Egyszerre aktív csatornák maximuma (0 = nincs korlát)", 0, 200)
     g = "EPG és logók"
     add("epg_source", "str", "", g, "XMLTV forrás URL (üresen: a lenti alapértelmezett)", env="TSP_EPG")
-    add("legacy_epg_url", "str", "", g, "Alapértelmezett EPG-cím (az exportált M3U-k fejlécében is ez szerepel)")
+    add("legacy_epg_url", "str", "", g, "Alapértelmezett EPG-cím (az exportált M3U-k fejlécében is ez szerepel; üresen nincs)")
     add("epg_refresh", "int", 3600, g, "EPG újraolvasása (mp)", 60, 86400)
     add("logos_dir", "str", "", g, "Csatornalogók könyvtára (<csatornanév>.png)")
     g = "Letöltés és lejátszás"
     add("threads", "int", 3, g, "Párhuzamos szegmensek csatornánként", 1, 8)
+    add("upstream_ua", "str", "Mozilla/5.0", g, "A szolgáltató felé használt User-Agent (egyes relayek a VLC UA-ra nem válaszolnak)")
     add("range_conc", "int", 8, g, "Párhuzamos Range-kérések csatornánként", 1, 32)
     add("range_chunk", "int", 524288, g, "Range-rész mérete bájtban (0 = kikapcsolva)", 0, 4194304)
     add("start_back", "int", 2, g, "Ennyi szegmenssel az élő adás mögött indul", 1, 6)
@@ -91,7 +122,7 @@ def _spec():
     g = "Katalógus és kimenet"
     add("playlist_only_alive", "bool", True, g, "A playlist csak az elérhető (nem halott) csatornákat tartalmazza")
     add("ip_only", "bool", False, g, "Csak IP-alapú forrás-URL használható (domain-alapú nem kerül a listákba)")
-    add("write_legacy_files", "bool", False, g, "A régi fájlok (kimenet/hu.m3u, hu-aktiv.m3u, status.json, meres.json) írása")
+    add("write_legacy_files", "bool", False, g, "A régi fájlok (kimenet/*.m3u, status.json, meres.json) írása")
     add("history_keep", "int", 60, g, "Katalógus-mentések (visszaállítási pontok) száma", 5, 500)
     g = "Forrás-ellenőrzés"
     add("check_enabled", "bool", True, g, "Napi automatikus forrás-ellenőrzés")
@@ -104,20 +135,41 @@ def _spec():
     add("min_margin", "float", 1.2, g, "Ez alatt „nem stabil” a forrás (szegmenshossz / letöltési idő)", 0.5, 5)
     add("switch_factor", "float", 1.5, g, "Ennyiszer jobbnak kell lennie az újnak a forrásváltáshoz", 1, 5)
     add("parallel_probe", "bool", True, g, "Gyenge forrásnál párhuzamos (Range) mérés is: így mér a proxy valójában")
-    add("auto_candidates", "bool", True, g, "Ugyanazon csatorna keresése a többi relay hoston is (/live/<slug>/index.m3u8)")
+    add("auto_candidates", "bool", True, g, "Ugyanazon csatorna keresése a többi relay hoston is (/live/<slug>/<index|playlist>.m3u8)")
+    add("slug_variants", "bool", True, g, "Slug-változatok mérése: a csatorna minden lehetséges slugját megpróbálja minden relay hoston (a provider IP-nként eltérő slugot használhat)")
+    add("slug_variants_max", "int", 6, g, "Csatornánként legfeljebb ennyi slug-változat", 1, 20)
+    add("probe_reuse", "int", 12, g, "Friss, sikeres mérés újrahasznosítása ennyi óráig az ellenőrzésben (0 = mindig újramérés)", 0, 168)
+    add("probe_connect", "int", 4, g, "Kapcsolódási időkorlát ellenőrzéskor (mp) – az elérhetetlen host gyorsan bukjon meg", 1, 15)
     add("relays", "text", DEFAULT_RELAYS, g, "Relay hostok (soronként egy, pl. http://203.0.113.10); üresen nincs relay-keresés")
     g = "Élő átváltás (failover)"
     add("failover_enabled", "bool", True, g, "Lejátszás közbeni automatikus átváltás másik forrásra")
     add("failover_errors", "int", 3, g, "Ennyi egymás utáni szegmenshiba után vált", 1, 20)
     add("failover_stall", "int", 45, g, "Ennyi mp-ig tartó új szegmens nélküli megakadás után vált", 10, 600)
-    add("failover_cooldown", "int", 600, g, "Egy csatornán két átváltás között legalább ennyi mp telik el", 30, 86400)
+    add("failover_cooldown", "int", 600, g, "Sikeres átváltás után legalább ennyi mp telik el a csatorna következő átváltásáig", 30, 86400)
+    add("failover_retry", "int", 60, g, "Sikertelen átváltás után legkorábban ennyi mp múlva próbál újra", 10, 3600)
+    add("failover_candidates", "int", 24, g, "Átváltáskor legfeljebb ennyi jelöltet mér (azonos slug a többi hoston előbb)", 6, 100)
+    add("failover_workers", "int", 4, g, "Átváltási jelöltek párhuzamos mérése ennyi szállal", 1, 8)
+    add("failover_fresh", "int", 600, g, "Átváltáskor csak eddig friss (mp) mérési eredményt fogad el cache-ből", 60, 86400)
     g = "Értesítés"
     add("webhook_url", "str", "", g, "Webhook URL (JSON POST; pl. Home Assistant)")
     add("webhook_events", "str", "dead,recovered,failover,failover_failed,switched", g,
         "Értesítendő események (vesszővel): dead, recovered, switched, failover, failover_failed, failover_blocked, check_done")
+    g = "HDHomeRun-tuner (Plex)"
+    add("hdhr_enabled", "bool", True, g, "HDHomeRun-emuláció: a Plex élő tunernek látja a proxyt (/discover.json, /lineup.json, /auto/v<szám>, /hdhr/epg.xml)")
+    add("hdhr_tuners", "int", 16, g, "A tuner jelentett párhuzamos fogadóinak száma (a Plex ennyi egyidejű streamet enged; nagyobb = a beragadt foglalások nem blokkolnak)", 1, 32)
+    add("hdhr_discovery", "bool", True, g, "Automatikus felderítés: bináris TLV + szöveges (UDP 65001) és SSDP (UDP 1900)")
+    add("hdhr_port80", "bool", False, g, "Port-80-as tükör: a Plex egyes útvonalai a hirdetett port helyett a 80-at kérdeznek (ehhez CAP_NET_BIND_SERVICE vagy root kell)")
+    add("hdhr_name", "str", "", g, "Tuner megjelenő neve (üresen: iptv-ts-proxy@<host>)")
     g = "Statisztika"
     add("stats_enabled", "bool", True, g, "Nézettségi statisztika gyűjtése")
     add("stats_days", "int", 90, g, "Statisztika megőrzése (nap)", 7, 3650)
+    g = "Naplózás"
+    add("log_enabled", "bool", True, g, "Naplózás be/ki (journal és a Napló fül); kikapcsolva a hibák sem naplózódnak")
+    add("log_level", "choice", "INFO", g, "Legalacsonyabb naplózott szint (DEBUG a legrészletesebb)",
+        choices=list(LOG_LEVELS))
+    for cat, desc in LOG_CATS.items():
+        add("log_" + cat, "bool", cat != "diag", g,
+            desc + " (kikapcsolva csak a figyelmeztetések és hibák maradnak)")
     return S
 
 
@@ -160,6 +212,8 @@ class Cfg:
             return int(val)
         if t == "float":
             return float(val)
+        if t == "choice":
+            return str(val).strip().upper()
         return str(val).strip() if t != "text" else str(val).replace("\r", "").strip()
 
     def relay_list(self):
@@ -183,6 +237,9 @@ class Cfg:
         elif t == "time":
             if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", v):
                 raise ValueError(f"{key}: HH:MM formátum kell")
+        elif t == "choice":
+            if v not in s["choices"]:
+                raise ValueError(f"{key}: {'|'.join(s['choices'])} egyike legyen")
         elif t == "text" and key == "relays":
             for line in v.splitlines():
                 if line.strip() and not re.match(r"^https?://[^\s/]+$", line.strip().rstrip("/")):
@@ -297,6 +354,18 @@ class Segment:
         self.chunks = []
         self.done = False
         self.failed = False
+        self.up_done = False       # az upstream e szegmens adatát teljesen pufferelte
+        self.in_bytes = 0          # a pacer számára: enqueue-olt bájtok
+        self.pending = 0
+        self.touched = time.time()  # utolsó kiengedett adat (a kliens az elakadt szegmenst átugorja)
+        self.dur = None             # a szegmens hossza az EXTINF szerint (mp)
+
+
+# HDHomeRun-stílusú null-csomag (PID 0x1FFF): a szegmensközi üresek kitöltésére. A
+# lejátszók/transcoderek átdobják, de az adatfolyam nem áll meg — a Plex DVR-segmentere
+# az elhallgatást "idle session"-ként kezeli, és killeli a lejátszást.
+NULL_PKT = b"\x47\x1f\xff\x10" + b"\xff" * 184
+NULL_BLOCK = NULL_PKT * 128            # ~24 KB
 
 
 class Session:
@@ -304,6 +373,7 @@ class Session:
 
     def __init__(self, app, ch):
         self.A, self.ch, self.cfg, self.http = app, ch, app.cfg, app.http
+        self.ua = app.cfg.upstream_ua
         self.cur_url = ch.url
         self.switch_req = None
         self.segs = deque(maxlen=self.cfg.keep)
@@ -320,8 +390,16 @@ class Session:
         self._cid = 0
         self.counter = 0                 # belső szegmens-index (forrásváltáskor is monoton)
         self.fail_streak = 0
+        self.pl_streak = 0               # egymás utáni playlist-letöltési hibák
+        self.last_pl_ok = time.time()    # utolsó sikeres playlist-letöltés
         self.last_new = time.time()
         self.samples = deque(maxlen=90)  # (idő, bytes_in) 2 mp-enként
+        # kimenet-simítás: a letöltés pufferbe megy, a pacer real-time ütemezéssel adja ki
+        self.bufq = deque()              # (seg, chunk) FIFO
+        self.buf_bytes = 0
+        self.rate = 2_500_000.0          # becsült kimenet, bájt/mp (szegmensenként finomítva)
+        self.td_cur = 6.0
+        self.last_out = time.time()
 
     def sample(self):
         self.samples.append((time.time(), self.bytes_in))
@@ -342,8 +420,10 @@ class Session:
 
     # -- upstream playlist
     async def fetch_text(self, url):
-        async with self.http.get(url, headers={"User-Agent": UA},
-                                 timeout=aiohttp.ClientTimeout(total=15)) as r:
+        # sock_connect + rövidebb total: az elérhetetlen/félig halott relay gyorsan bukjon meg,
+        # hogy a friss kapcsolódás gyors failover-je a Plex 30 mp-es ablakán belül beérjen
+        async with self.http.get(url, headers={"User-Agent": self.ua},
+                                 timeout=aiohttp.ClientTimeout(total=8, sock_connect=5)) as r:
             r.raise_for_status()
             return await r.text(errors="replace")
 
@@ -364,21 +444,78 @@ class Session:
 
     @staticmethod
     def parse_media(text, base):
-        seq, td, segs = 0, 6.0, []
+        seq, td, segs, dur = 0, 6.0, [], None
         for line in text.splitlines():
             if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
                 seq = int(line.split(":")[1])
             elif line.startswith("#EXT-X-TARGETDURATION:"):
                 td = float(line.split(":")[1])
+            elif line.startswith("#EXTINF:"):
+                m = re.match(r"#EXTINF:\s*([\d.]+)", line)
+                dur = float(m.group(1)) if m else None
             elif line.strip() and not line.startswith("#"):
-                segs.append((seq + len(segs), urljoin(base, line.strip())))
+                segs.append((seq + len(segs), urljoin(base, line.strip()), dur))
         return td, segs
 
     async def publish_data(self, seg, data):
         seg.chunks.append(data)
-        self.bytes_in += len(data)
+        self.last_out = seg.touched = time.time()
         async with self.cond:
             self.cond.notify_all()
+
+    async def enqueue(self, seg, data):
+        """Letöltött adat pufferbe: a pacer ütemezve engedi ki (folyamatos kimenet)."""
+        seg.in_bytes += len(data)
+        seg.pending += 1
+        self.bytes_in += len(data)       # valódi upstream-bájt (a null-töltés nem számít bele)
+        self.bufq.append((seg, data))
+        self.buf_bytes += len(data)
+        async with self.cond:
+            self.cond.notify_all()
+
+    async def pacer(self):
+        """Kimenet-ütemező: a pufferből rate bájt/mp-et enged ki, és szegmensközi
+        elhallgatásnál null-csomagokkal tölti a folyamatot (a Plex DVR-segmentere
+        az üresjáratot idle-ként kezeli és killeli a lejátszást)."""
+        try:
+            n = 0
+            while not self.stopped:
+                await asyncio.sleep(0.25)
+                budget = self.rate * 0.25
+                if self.buf_bytes > 12_000_000:      # túlcsordulás ellen: gyorsítva ki
+                    budget = float("inf")
+                while budget > 0 and self.bufq:
+                    seg, chunk = self.bufq.popleft()
+                    self.buf_bytes -= len(chunk)
+                    budget -= len(chunk)
+                    await self.publish_data(seg, chunk)
+                    seg.pending -= 1
+                # lezárás: a kijárt szegmens (upstream kész + minden darabja kiengedve) itt zárul,
+                # nem a darab kiengedésekor – ha az utolsó darab az up_done jelzés ELŐTT jár ki
+                # (lassú upstream, EOF-várakozás, félbeszakadt szegmens), a szegmens különben
+                # sosem kapna done-t, és a kliens örökre rajta ragadna
+                for seg in self.segs:
+                    if seg.up_done and seg.pending <= 0 and not seg.done:
+                        if not self.bufq:        # szegmens-végi null-töltés a folytonosságért
+                            await self.publish_data(seg, NULL_BLOCK * 4)
+                        seg.done = True
+                        async with self.cond:
+                            self.cond.notify_all()
+                if (not self.bufq and self.clients > 0
+                        and time.time() - self.last_out > 2.0):
+                    seg = Segment(self.counter)
+                    self.counter += 1
+                    seg.chunks = [NULL_BLOCK] * 8
+                    seg.done = True
+                    await self.publish(seg)
+                    self.last_out = time.time()
+                n += 1
+                if self.clients and n % 20 == 0 and dlog.isEnabledFor(logging.INFO):   # ~5 mp-enként
+                    dlog.info("%s pacer: buf=%.1fMB rate=%.2fMbps last_out=%.1fs pended=%d",
+                             self.ch.name, self.buf_bytes / 1e6, self.rate / 125000,
+                             time.time() - self.last_out, self.bufq[0][0].pending if self.bufq else 0)
+        except asyncio.CancelledError:
+            raise
 
     async def fetch_part(self, url, a, b, prio):
         """Egy bájttartomány letöltése (újrapróbálással). Az rsem prioritás szerint korlátoz."""
@@ -387,7 +524,7 @@ class Session:
             try:
                 async with self.rsem.slot(prio):
                     async with self.http.get(
-                            url, headers={"User-Agent": UA, "Range": f"bytes={a}-{b}"},
+                            url, headers={"User-Agent": self.ua, "Range": f"bytes={a}-{b}"},
                             timeout=aiohttp.ClientTimeout(total=40, sock_read=15)) as r:
                         if r.status not in (200, 206):
                             raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status)
@@ -408,7 +545,7 @@ class Session:
         try:
             async with self.rsem.slot((seg.seq, 0)):
                 async with self.http.get(
-                        url, headers={"User-Agent": UA, "Range": f"bytes=0-{ch - 1}"},
+                        url, headers={"User-Agent": self.ua, "Range": f"bytes=0-{ch - 1}"},
                         timeout=aiohttp.ClientTimeout(total=40, sock_read=15)) as r:
                     if r.status != 206:
                         pass_through = True
@@ -419,10 +556,10 @@ class Session:
             if pass_through:
                 return await self.download_stream(seg, url)
             if total <= 0 or total <= len(first):
-                await self.publish_data(seg, first)
-                seg.done = True
+                await self.enqueue(seg, first)
+                seg.up_done = True
                 return
-            await self.publish_data(seg, first)
+            await self.enqueue(seg, first)
             starts = list(range(ch, total, ch))
             tasks = [asyncio.create_task(self.fetch_part(url, a, min(a + ch, total) - 1, (seg.seq, i + 1)))
                      for i, a in enumerate(starts)]
@@ -431,17 +568,17 @@ class Session:
                 for i, t in enumerate(tasks):
                     try:
                         data = await t
-                        await self.publish_data(seg, data)
+                        await self.enqueue(seg, data)
                         pos += len(data)
                     except Exception as e:  # noqa: BLE001
                         # a szolgáltató eltüntette a szegmenst a részek letöltése közben (404):
                         # a hiányzó részt egy teljes (Range nélküli) letöltéssel pótoljuk, hogy ne legyen lyuk
-                        log.warning("%s seg %s: rész %d/%d hiba (%s) – teljes letöltéssel pótlom",
+                        slog.warning("%s seg %s: rész %d/%d hiba (%s) – teljes letöltéssel pótlom",
                                     self.ch.name, seg.seq, i + 1, len(tasks), e)
                         if await self.download_tail(seg, url, pos):
                             return
                         raise
-                seg.done = True
+                seg.up_done = True
                 return
             finally:
                 for t in tasks:
@@ -450,12 +587,13 @@ class Session:
             raise
         except Exception as e:  # noqa: BLE001
             self.errors += 1
-            if seg.chunks:                       # félig kiadott szegmens: nem próbáljuk újra
-                log.warning("%s seg %s megszakadt: %s", self.ch.name, seg.seq, e)
+            if seg.in_bytes:                     # félig pufferelt szegmens: nem próbáljuk újra
+                slog.warning("%s seg %s megszakadt: %s", self.ch.name, seg.seq, e)
                 seg.failed = True
-                seg.done = True
+                seg.up_done = True
                 return
-        await self.download_stream(seg, url)     # még semmit nem adtunk ki: teljes letöltéssel újra
+        if seg.in_bytes == 0:
+            await self.download_stream(seg, url)  # még semmit nem puffereltünk: teljes letöltéssel újra
 
     async def download_tail(self, seg, url, skip):
         """A szegmens hátralévő része egyetlen, Range nélküli letöltéssel (a már kiküldött `skip` bájtot átugorva).
@@ -463,7 +601,7 @@ class Session:
         for attempt in range(2):
             try:
                 async with self.http.get(
-                        url, headers={"User-Agent": UA},
+                        url, headers={"User-Agent": self.ua},
                         timeout=aiohttp.ClientTimeout(total=60, sock_read=15)) as r:
                     if r.status != 200:
                         raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status)
@@ -476,12 +614,12 @@ class Session:
                             chunk = chunk[skip - seen:]
                             seen = skip
                         seen += len(chunk)
-                        await self.publish_data(seg, chunk)
-                    seg.done = True
+                        await self.enqueue(seg, chunk)
+                    seg.up_done = True
                     return True
             except Exception as e:  # noqa: BLE001
                 self.errors += 1
-                log.warning("%s seg %s: teljes pótlás %d. próba hiba: %s", self.ch.name, seg.seq, attempt + 1, e)
+                slog.warning("%s seg %s: teljes pótlás %d. próba hiba: %s", self.ch.name, seg.seq, attempt + 1, e)
                 await asyncio.sleep(0.4 * (attempt + 1))
         return False
 
@@ -489,25 +627,25 @@ class Session:
         for attempt in range(3):
             try:
                 async with self.http.get(
-                        url, headers={"User-Agent": UA},
+                        url, headers={"User-Agent": self.ua},
                         timeout=aiohttp.ClientTimeout(total=60, sock_read=15)) as r:
                     if r.status != 200:
                         raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status)
                     async for chunk in r.content.iter_chunked(64 * 1024):
-                        seg.chunks.append(chunk)
-                        self.bytes_in += len(chunk)
-                        async with self.cond:
-                            self.cond.notify_all()
-                    seg.done = True
+                        await self.enqueue(seg, chunk)
+                    seg.up_done = True
                     return
             except Exception as e:  # noqa: BLE001
                 self.errors += 1
-                if seg.chunks:           # félig kiadott szegmens: nem próbáljuk újra
+                if seg.in_bytes:         # félig pufferelt szegmens: nem próbáljuk újra
                     break
-                log.warning("%s seg %s próba %d: %s", self.ch.name, seg.seq, attempt + 1, e)
+                slog.warning("%s seg %s próba %d: %s", self.ch.name, seg.seq, attempt + 1, e)
                 await asyncio.sleep(0.5 * (attempt + 1))
         seg.failed = True
-        seg.done = True
+        if seg.in_bytes == 0:
+            seg.done = True              # adat nélkül: a pacer nem érinti, le lehet zárni
+        else:
+            seg.up_done = True           # a pacer engedi ki, aztán zárja le
 
     async def publish(self, seg):
         async with self.cond:
@@ -516,76 +654,139 @@ class Session:
 
     async def run(self):
         sem = asyncio.Semaphore(self.cfg.threads)
-        seen = set()
+        hi = None                        # a jelenlegi forrás legnagyobb kiadott media-sequence-e
+        hi_prev = None                   # forrásváltáskor a régi forrás hi-ja (folytatáshoz)
         first = True
         inflight = set()
         murl = None
 
+        def switch(url, abort):
+            nonlocal murl, first, hi, hi_prev
+            self.cur_url, murl, first = url, None, True
+            hi_prev, hi = hi, None
+            self.fail_streak, self.last_new = 0, time.time()
+            if abort:                    # halott forrás: a folyamatban lévő letöltései ne tartsák fel a klienst
+                for t in list(inflight):
+                    t.cancel()
+
         async def job(seg, url):
-            async with sem:
-                await self.download(seg, url)
+            try:
+                async with sem:
+                    await self.download(seg, url)
+            except asyncio.CancelledError:
+                # forrásváltáskor a régi forrás folyamatban lévő letöltései megszakadnak:
+                # a szegmens lezárható (a pacer kiengedi, ami már megjött, aztán done)
+                seg.failed = seg.up_done = True
+                raise
+            # kimeneti bitráta finomítása: szegmens-bájtok / a szegmens tényleges hossza (EXTINF)
+            if seg.in_bytes and (seg.dur or self.td_cur):
+                est = seg.in_bytes / (seg.dur or self.td_cur)
+                self.rate = max(100_000.0, 0.6 * self.rate + 0.4 * min(est, 12_000_000.0))
             self.fail_streak = self.fail_streak + 1 if seg.failed else 0
             async with self.cond:
                 self.cond.notify_all()
 
         try:
+            pad = asyncio.create_task(self.pacer())
             while not self.stopped:
                 if time.time() - self.last_client > self.cfg.idle and self.clients == 0:
-                    log.info("%s: néző nélkül leáll", self.ch.name)
+                    slog.info("%s: néző nélkül leáll", self.ch.name)
                     break
                 # a katalógusban megváltozott aktív forrás (szerkesztés / ellenőrzés): zökkenő nélküli váltás
                 if self.switch_req and self.switch_req != self.cur_url:
-                    log.info("%s: forrásváltás (katalógus): %s", self.ch.name, self.switch_req)
-                    self.cur_url, murl, seen, first = self.switch_req, None, set(), True
-                    self.fail_streak, self.last_new = 0, time.time()
+                    slog.info("%s: forrásváltás (katalógus): %s", self.ch.name, self.switch_req)
+                    switch(self.switch_req, abort=False)
                 self.switch_req = None
                 # élő átváltás másik forrásra, ha elakad az adás
                 if self.cfg.failover_enabled and self.clients > 0:
                     errs = self.fail_streak >= self.cfg.failover_errors
-                    if errs or time.time() - self.last_new > self.cfg.failover_stall:
-                        reason = "szegmenshibák" if errs else "az adás megakadt"
-                        new = await self.A.failover(self, reason)
+                    stall = time.time() - self.last_new > self.cfg.failover_stall
+                    # nem válaszoló playlist (lefagyott host): nem várjuk ki a failover_errors × 8 mp-es
+                    # időkorlátot – két célszegmensnyi (min. 12 mp) sikertelenség már halott forrás
+                    pl_dead = self.pl_streak >= 1 and time.time() - self.last_pl_ok > max(12.0, 2 * self.td_cur)
+                    young = time.time() - self.started < 30
+                    # friss kapcsolódásnál gyors út: a néző (pl. a Plex) ~30 mp után feladja,
+                    # addig minden próbálkozásnak szabad azonnal lennie
+                    fast = young and (self.fail_streak >= 1 and self.bytes_in == 0
+                                      or self.fail_streak >= 2)
+                    if errs or fast or stall or pl_dead:
+                        reason = ("első kapcsolódás hibás forrásra" if fast and self.bytes_in == 0 else
+                                  "playlist-hibák" if self.pl_streak >= self.cfg.failover_errors or pl_dead else
+                                  "szegmenshibák" if errs or fast else "az adás megakadt")
+                        # hard: a forrás teljesen halott (nincs playlist / nincs új szegmens) – ekkor a
+                        # sikeres váltás utáni cooldown sem tarthatja percekig sötétben a nézőt
+                        hard = stall or pl_dead or self.pl_streak >= self.cfg.failover_errors
+                        new = await self.A.failover(self, reason, quick=fast, urgent=fast, hard=hard)
                         self.fail_streak, self.last_new = 0, time.time()
+                        self.pl_streak, self.last_pl_ok = 0, time.time()
                         if new:
-                            self.cur_url, murl, seen, first = new, None, set(), True
+                            switch(new, abort=True)
                             continue
                 try:
                     if murl is None:
                         murl = await self.media_url()
                     td, segs = self.parse_media(await self.fetch_text(murl), murl)
+                    self.pl_streak, self.last_pl_ok = 0, time.time()
                 except Exception as e:  # noqa: BLE001
                     self.errors += 1
                     self.fail_streak += 1
-                    log.warning("%s playlist hiba: %s", self.ch.name, e)
+                    self.pl_streak += 1
+                    slog.warning("%s playlist hiba: %s", self.ch.name, e or type(e).__name__)
                     murl = None
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     continue
                 if first and segs:
-                    segs = segs[-self.cfg.start_back:]
-                    first = False
+                    last = segs[-1][0]
+                    if hi_prev is not None and segs[0][0] - 1 <= hi_prev <= last + 3:
+                        # azonos számozás (ugyanaz az origin másik relayen): ott folytatjuk, ahol a
+                        # régi forrás abbahagyta – nincs ismétlődő vagy kihagyott szegmens
+                        hi = hi_prev
+                    else:
+                        # rövid (gyors evikciójű) playlistnél az élő fejénél indulunk: a start_back
+                        # miatti lemaradás ott már kijárt szegmenst jelent (404 a kapcsolat első másodperceiben).
+                        # Idegen számozású új forrásnál is az élő fejénél: a visszalépés ismétlést okozna.
+                        n = self.cfg.start_back if len(segs) >= self.cfg.start_back + 3 and hi_prev is None else 1
+                        hi = segs[-n][0] - 1
+                    first, hi_prev = False, None
+                elif segs and hi is not None and segs[-1][0] < hi - len(segs) - 5:
+                    slog.info("%s: a forrás media-sequence-e újraindult (%s -> %s)", self.ch.name, hi, segs[-1][0])
+                    hi = segs[-1][0] - 1
                 # ha az eddigi szegmensek mind hibásak (lejártak), a kliens a következőkre vár
                 if segs and self.segs and all(s.failed for s in self.segs):
-                    segs = segs[-1:]
-                for src_seq, url in segs:
-                    if src_seq in seen:
+                    hi = max(hi, segs[-1][0] - 1)
+                for src_seq, url, dur in segs:
+                    # csak a már kiadottnál újabb szegmens: a régebbiek (a playlist eleje az indulási
+                    # pont előtt) különben a következő frissítéskor visszafelé kerülnének a folyamba
+                    if src_seq <= hi:
                         continue
-                    seen.add(src_seq)
+                    hi = src_seq
                     self.last_new = time.time()
                     seg = Segment(self.counter)
+                    seg.dur = dur or td or self.td_cur      # a tényleges hossz a bitráta-becsléshez
                     self.counter += 1
                     await self.publish(seg)
                     t = asyncio.create_task(job(seg, url))
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
-                if len(seen) > 500:
-                    seen = set(sorted(seen)[-100:])
+                self.td_cur = td or self.td_cur
                 await asyncio.sleep(max(1.0, td / 2))
         finally:
             for t in inflight:
                 t.cancel()
             self.stopped = True
+            if pad and not pad.done():
+                pad.cancel()
             async with self.cond:
                 self.cond.notify_all()
+
+    def _stuck(self, seg):
+        """A kliens ne ragadjon egy szegmensen, amelyre már nem jön adat: a letöltése régóta nem
+        adott semmit, miközben egy KÉSŐBBI szegmens már kapott adatot (a pacer sorban enged ki,
+        tehát ez csak elakadt letöltésnél fordul elő). A pufferből kiesett szegmenst NEM ugorjuk
+        át: a kliens a saját hivatkozásán keresztül továbbra is megkapja a tartalmát."""
+        if seg.done or time.time() - seg.touched < max(20.0, 3 * self.td_cur):
+            return False
+        return any(s.seq > seg.seq and s.in_bytes for s in self.segs)
 
     # -- kliens kiszolgálás
     async def serve(self, request):
@@ -597,6 +798,7 @@ class Session:
         self.last_client = time.time()
         self._cid += 1
         cid = self._cid
+        wrote_since_log = [0, time.time()]
         rec = {"id": cid, "ip": request.headers.get("CF-Connecting-IP") or request.remote,
                "ua": request.headers.get("User-Agent", "")[:90],
                "since": time.time(), "bytes": 0, "transport": request.transport}
@@ -622,20 +824,31 @@ class Session:
                         await self.cond.wait()
                         continue
                 if sent_seq is not None and nxt.seq > sent_seq + 1:
-                    log.info("%s: kliens lemaradt, ugrik %s -> %s", self.ch.name, sent_seq, nxt.seq)
+                    slog.info("%s: kliens lemaradt, ugrik %s -> %s", self.ch.name, sent_seq, nxt.seq)
                 i = 0
                 while True:
                     while i < len(nxt.chunks):
-                        await resp.write(nxt.chunks[i])
+                        # 60 mp-es írási korlát: ha a kliens nem olvassa tovább (beragadt lejátszó,
+                        # elhagyott Plex-tuner-slot), a kapcsolat felszabadul, nem foglal örökké
+                        await asyncio.wait_for(resp.write(nxt.chunks[i]), 60)
                         rec["bytes"] += len(nxt.chunks[i])
+                        wrote_since_log[0] += len(nxt.chunks[i])
                         i += 1
+                    if wrote_since_log[0] and time.time() - wrote_since_log[1] > 5:
+                        dlog.info("%s kliens %d: %d B/5s, seg %s/%s", self.ch.name, cid,
+                                  wrote_since_log[0], nxt.seq, "done" if nxt.done else "folyamatban")
+                        wrote_since_log[0], wrote_since_log[1] = 0, time.time()
                     if nxt.done:
                         if i >= len(nxt.chunks):
                             break
                         continue
                     async with self.cond:
                         if i >= len(nxt.chunks) and not nxt.done and not self.stopped:
-                            await self.cond.wait()
+                            if self._stuck(nxt):
+                                slog.info("%s: elakadt szegmens (%s) kihagyva", self.ch.name, nxt.seq)
+                                break
+                            # 120 mp: élő szünet sosem ennyi (failover ~15-20 s); tovább váró kliens halott
+                            await asyncio.wait_for(self.cond.wait(), 120)
                         elif self.stopped and not nxt.done and i >= len(nxt.chunks):
                             break
                 sent_seq = nxt.seq
@@ -655,6 +868,7 @@ class App:
     def __init__(self, cfg):
         self.cfg = cfg
         self.log = log
+        self.VERSION = VERSION
         self.catalog = Catalog(cfg.catalog_path, os.path.join(cfg.data, "catalog-history"), cfg.history_keep)
         self.health = Health(self)
         self.channels = {}               # id -> Channel (kiszolgálható: engedélyezett + van aktív URL)
@@ -662,6 +876,8 @@ class App:
         self.epg_gz = None
         self.epg_xml = None
         self.epg_time = 0
+        self.epg_hdhr_xml = None
+        self.epg_hdhr_gz = None
         self.started = time.time()
         self.epg_index = {}              # tvg-id -> [(start, stop, cím), ...] rendezve
         self.epg_stats = (0, 0)
@@ -689,8 +905,9 @@ class App:
                 old.session.stopped = True
         self.channels = new
 
-    async def failover(self, session, reason):
-        return await self.health.failover(session.ch.id, session.cur_url, reason)
+    async def failover(self, session, reason, quick=False, urgent=False, hard=False):
+        return await self.health.failover(session.ch.id, session.cur_url, reason,
+                                          quick=quick, urgent=urgent, hard=hard)
 
     def write_legacy(self, measured=None, dt=0.0, mode=""):
         """A régi pipeline fájljai (kimenet/*.m3u, status.json, meres.json): az nginx/CF linkek és a refresh.py ezeket olvassák."""
@@ -779,15 +996,25 @@ class App:
         t0 = time.time()
         src = self.cfg.epg_source or self.cfg.legacy_epg_url
         if not src:
-            log.info("epg: nincs forrás beállítva (epg_source), kihagyva")
+            elog.info("epg: nincs forrás beállítva (epg_source), kihagyva")
             return
-        log.info("epg forrás: %s", src)
+        elog.info("epg forrás: %s", src)
         async with self.http.get(src, timeout=aiohttp.ClientTimeout(total=120)) as r:
             r.raise_for_status()
             raw = await r.read()
+        chans = [dict(c) for c in self.catalog.channels]
+        # a több MB-os XMLTV feldolgozása és tömörítése külön szálon: az event loopban másodpercekre
+        # megállította volna az összes futó adást (a Plex ezt elhallgatásnak veszi)
+        (self.epg_index, self.epg_stats, self.epg_hdhr_xml, self.epg_hdhr_gz,
+         self.epg_xml, self.epg_gz) = await asyncio.to_thread(self._build_epg, raw, chans)
+        self.epg_used, self.epg_time = src, time.time()
+        elog.info("epg: %d csatorna, %d műsor, %.1fs", *self.epg_stats, time.time() - t0)
+
+    def _build_epg(self, raw, chans):
+        """XMLTV szűrése a katalógusra + HDHomeRun-változat; szálon fut, a megosztott állapotot nem írja."""
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
-        keep = {c.get("tvg_id") for c in self.catalog.channels if c.get("tvg_id") and c.get("enabled") is not False}
+        keep = {c.get("tvg_id") for c in chans if c.get("tvg_id") and c.get("enabled") is not False}
         root = ET.fromstring(raw)
         out = ET.Element("tv", root.attrib)
         n_ch = n_pr = 0
@@ -806,13 +1033,41 @@ class App:
                     pass
         for lst in index.values():
             lst.sort()
-        self.epg_index, self.epg_stats, self.epg_used = index, (n_ch, n_pr), src
-        xml = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(out, encoding="utf-8")
-        self.epg_xml, self.epg_gz, self.epg_time = xml, gzip.compress(xml), time.time()
+        # a normál EPG-be is kerül „<szám> <név>” display-name: a Plex a tuner GuideNumber-e
+        # alapján párosít, és ha valaki a normál EPG-t adja meg guide-nak, így is egyezni fog
+        chno_by_tvg = {c.get("tvg_id"): str(c["chno"]) for c in chans
+                       if c.get("tvg_id") and c.get("chno") and c.get("enabled") is not False}
+        for el in out:
+            if el.tag == "channel":
+                gn = chno_by_tvg.get(el.get("id"))
+                if gn:
+                    dn = ET.SubElement(el, "display-name")
+                    dn.text = (f"{gn} {(el.findtext('display-name') or '').strip()}").strip()
+        # HDHomeRun/Plex EPG: a csatorna-id a katalógus chno-ja, hogy a Plex a tuner lineupjával párosítani tudja
+        hmap = {c.get("tvg_id"): str(c["chno"]) for c in chans
+                if c.get("tvg_id") and c.get("chno") and c.get("enabled") is not False}
+        hdhr_out = ET.Element("tv", root.attrib)
+        for el in out:
+            el2 = copy.deepcopy(el)
+            if el.tag == "channel":
+                gn = hmap.get(el.get("id"))
+                if gn:
+                    el2.set("id", gn)          # a „<szám> <név>” display-name már a normál EPG-ben rajta van
+            elif el.tag == "programme":
+                gn = hmap.get(el.get("channel"))
+                if gn:
+                    el2.set("channel", gn)
+            hdhr_out.append(el2)
+        hxml = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(hdhr_out, encoding="utf-8")
+        hgz = gzip.compress(hxml)
         os.makedirs(self.cfg.data, exist_ok=True)
+        with open(os.path.join(self.cfg.data, "epg-hdhr.xml.gz"), "wb") as f:
+            f.write(hgz)
+        xml = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(out, encoding="utf-8")
+        gz = gzip.compress(xml)
         with open(os.path.join(self.cfg.data, "epg.xml.gz"), "wb") as f:
-            f.write(self.epg_gz)
-        log.info("epg: %d csatorna, %d műsor, %.1fs", n_ch, n_pr, time.time() - t0)
+            f.write(gz)
+        return index, (n_ch, n_pr), hxml, hgz, xml, gz
 
     async def refresher(self):
         last_epg = time.time()
@@ -823,7 +1078,7 @@ class App:
                 try:
                     await self.load_epg()
                 except Exception as e:  # noqa: BLE001
-                    log.warning("epg frissítés hiba: %s", e)
+                    elog.warning("epg frissítés hiba: %s", e)
 
     async def sampler(self):
         """2 mp-enként mintát vesz az aktív csatornák bejövő bájtjaiból (sebesség-grafikon)."""
@@ -971,15 +1226,22 @@ class App:
         ch = self.channels.get(request.match_info["cid"])
         if not ch:
             raise web.HTTPNotFound()
+        s = self._session_for(ch, peer=request.headers.get("CF-Connecting-IP") or request.remote)
+        if s is None:
+            raise web.HTTPServiceUnavailable(text="elérte az egyidejű csatornák maximumát")
+        return await s.serve(request)
+
+    def _session_for(self, ch, peer=None):
+        """Meglévő, futó session visszaadása vagy új indítása; max_sessions-t figyelembe véve."""
         s = ch.session
         if s is None or s.stopped:
             mx = self.cfg.max_sessions
             if mx and sum(1 for c in self.channels.values() if c.session and not c.session.stopped) >= mx:
-                raise web.HTTPServiceUnavailable(text="elérte az egyidejű csatornák maximumát")
+                return None
             s = ch.session = Session(self, ch)
             s.task = asyncio.create_task(s.run())
-            log.info("%s: indul (%s)", ch.name, request.headers.get("CF-Connecting-IP") or request.remote)
-        return await s.serve(request)
+            slog.info("%s: indul (%s)", ch.name, peer or "-")
+        return s
 
     async def x_epg(self, request):
         self.ext_check(request)
@@ -1015,14 +1277,18 @@ class App:
         try:
             await self.load_epg()
         except Exception as e:  # noqa: BLE001
-            log.warning("epg betöltés hiba: %s", e)
+            elog.warning("epg betöltés hiba: %s", e)
         app["refresher"] = asyncio.create_task(self.refresher())
         app["sampler"] = asyncio.create_task(self.sampler())
         app["scheduler"] = asyncio.create_task(self.health.scheduler())
+        await hdhr.start_discovery(self, app)
+        await hdhr.start_mirror(self, app)
 
     async def on_stop(self, app):
         for k in ("refresher", "sampler", "scheduler"):
             app[k].cancel()
+        await hdhr.stop_discovery(self, app)
+        await hdhr.stop_mirror(self, app)
         for c in self.channels.values():
             if c.session:
                 c.session.stopped = True
@@ -1030,8 +1296,18 @@ class App:
 
     def build(self):
         import admin
+        ACC = logging.getLogger("tsproxy.access")
+        if not ACC.filters:
+            class _NoApi(logging.Filter):
+                def filter(self, rec):
+                    m = rec.getMessage()
+                    return "/api/" not in m and "/admin" not in m
+            ACC.addFilter(_NoApi())
+            ACC.propagate = True
         app = web.Application(middlewares=[admin.make_middleware(self)])
         admin.setup(self, app)
+        hdhr.setup(self, app)
+        self.access_log = ACC
         app.add_routes([
             web.get("/logo/{cid}.png", self.h_logo),
             web.get("/tv/{tok}/playlist.m3u", self.x_playlist),
@@ -1065,9 +1341,13 @@ def main():
     logging.getLogger().addHandler(RING)
     cfg = Cfg(a)
     cfg.load_settings()
+    apply_logging(cfg)
     if not cfg.admin_password:
         log.warning("TSP_ADMIN_PASSWORD nincs beállítva: az admin felület jelszó nélkül elérhető!")
-    web.run_app(App(cfg).build(), host=cfg.listen, port=cfg.port, access_log=None, print=None)
+    a = App(cfg)
+    webapp = a.build()
+    web.run_app(webapp, host=cfg.listen, port=cfg.port,
+                access_log=a.access_log, access_log_format='"%r" %a -> %s %bb %Tfs', print=None)
 
 
 if __name__ == "__main__":
