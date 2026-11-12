@@ -64,7 +64,12 @@ szolgáltató (HLS)  ──►  iptv-ts-proxy  ──►  /ch/<id>.ts     ──
 - **Forrás-ellenőrzés:** napi automatikus mérés (a szegmensletöltés sebessége a szegmenshosszhoz
   képest). A legjobb forrás kerül előre, hiszterézissel a pattogás ellen.
 - **Élő átváltás (failover):** hiba vagy megakadás esetén lejátszás közben másik forrásra vált,
-  a kliens kapcsolata nem szakad meg.
+  a kliens kapcsolata nem szakad meg; több relay hoston slug-változatokkal keresi ugyanazt a
+  csatornát, a folyam az új forrásról zökkenőmentesen folytatódik.
+- **HDHomeRun-tuner (Plex):** a proxyt a Plex natívan HDHomeRun-tunerként találja meg (Élő TV +
+  DVR, automatikus felderítés, HDHomeRun-EPG) – részletek a 11b. fejezetben.
+- **Kimenet-simítás:** a letöltött adat real-time ütemezéssel engedődik ki, szegmensközi
+  elhallgatásnál null-csomag tölti a folyamatot (a Plex DVR-segmentere így nem „idle” az adás).
 - **EPG:** XMLTV forrás (`.xml` / `.xml.gz`), a katalógus csatornáira szűrve. „Most / következő”
   műsor az admin felületen.
 - **Admin felület:** műszerfal (élő nézők, sebesség), katalógus-szerkesztő, ellenőrzés, események,
