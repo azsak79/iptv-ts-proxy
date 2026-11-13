@@ -56,6 +56,10 @@ canvas.spark{width:120px;height:26px;display:block}
 .cfg input[type=text],.cfg input[type=number],.cfg input[type=time]{width:100%;max-width:560px}
 .cfg textarea{width:100%;max-width:560px;min-height:70px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
 .cfg .mod{color:var(--warn);font-size:11px;margin-left:6px}
+/* a link-sorok a külső beállítás-grid teljes szélességére feszülnek (a beágyazott
+   label+érték gridjük különben a 300px-es címkéoszlopba csúszik be → üres/levágott értékek) */
+.cfg>.linkrow{grid-column:1/-1;min-width:0}
+.linkrow>label{white-space:normal}
 
 /* mobil: egy oszlopos beállítás-gridek, csúszkálható táblák, nem nyúlik szét a lap */
 @media (max-width:760px){
