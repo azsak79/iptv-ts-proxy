@@ -1043,15 +1043,22 @@ class App:
         for lst in index.values():
             lst.sort()
         # a normál EPG-be is kerül „<szám> <név>” display-name: a Plex a tuner GuideNumber-e
-        # alapján párosít, és ha valaki a normál EPG-t adja meg guide-nak, így is egyezni fog
+        # alapján párosít, és ha valaki a normál EPG-t adja meg guide-nak, így is egyezni fog.
+        # A név a KATALÓGUSból jön (lineup GuideName-nel egyező): az EPG-forrás nevei tartalmazhatnak
+        # minőségi/24/7 utótagot („(576p)”, „[Not 24/7]”), ami miatt a Plex nem találja a párost
         chno_by_tvg = {c.get("tvg_id"): str(c["chno"]) for c in chans
                        if c.get("tvg_id") and c.get("chno") and c.get("enabled") is not False}
+        name_by_chno = {str(c["chno"]): c["name"] for c in chans
+                        if c.get("chno") and c.get("enabled") is not False}
         for el in out:
             if el.tag == "channel":
                 gn = chno_by_tvg.get(el.get("id"))
                 if gn:
-                    dn = ET.SubElement(el, "display-name")
-                    dn.text = (f"{gn} {(el.findtext('display-name') or '').strip()}").strip()
+                    # a katalógus-néves display-name az ELSŐ helyre kerül: a Plex az elsőt
+                    # használja állomásnévként (a forráséban minőségi/24/7 utótag szokott lenni)
+                    dn = ET.Element("display-name")
+                    dn.text = (f"{gn} {name_by_chno.get(gn) or (el.findtext('display-name') or '').strip()}").strip()
+                    el.insert(0, dn)
         # HDHomeRun/Plex EPG: a csatorna-id a katalógus chno-ja, hogy a Plex a tuner lineupjával párosítani tudja
         hmap = {c.get("tvg_id"): str(c["chno"]) for c in chans
                 if c.get("tvg_id") and c.get("chno") and c.get("enabled") is not False}
