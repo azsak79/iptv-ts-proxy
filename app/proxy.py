@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -1014,8 +1015,32 @@ class App:
         self.epg_used, self.epg_time = src, time.time()
         elog.info("epg: %d csatorna, %d műsor, %.1fs", *self.epg_stats, time.time() - t0)
 
+    def _local_ip(self):
+        """A gép LAN-IP-je (UDP-connect trükkel, csomag nélkül) — a guide icon-URL-jeihez."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 53))
+            return s.getsockname()[0]
+        except OSError:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except OSError:
+                return "127.0.0.1"
+        finally:
+            s.close()
+
     def _build_epg(self, raw, chans):
         """XMLTV szűrése a katalógusra + HDHomeRun-változat; szálon fut, a megosztott állapotot nem írja."""
+        # csatornalogók: a proxy saját /logo/<id>.png végpontja (a forrás icon-URL-ei halott
+        # Dispatcharr-címek voltak, amin a Plex guide-feldolgozása elhasalt) — csak ha a logófájl létezik
+        logo_by_tvg = {}
+        if self.cfg.logos_dir:
+            base = f"http://{self._local_ip()}:{self.cfg.port}"
+            for c in chans:
+                if c.get("tvg_id") and c.get("enabled") is not False and "/" not in c["name"]:
+                    lp = os.path.join(self.cfg.logos_dir, c["name"] + ".png")
+                    if os.path.isfile(lp):
+                        logo_by_tvg.setdefault(c["tvg_id"], f"{base}/logo/{c['id']}.png")
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
         keep = {c.get("tvg_id") for c in chans if c.get("tvg_id") and c.get("enabled") is not False}
@@ -1026,6 +1051,11 @@ class App:
         names = {}
         for el in root:
             if el.tag == "channel" and el.get("id") in keep:
+                for ic in el.findall("icon"):
+                    el.remove(ic)
+                lu = logo_by_tvg.get(el.get("id"))
+                if lu:
+                    ic = ET.SubElement(el, "icon"); ic.set("src", lu)
                 out.append(el)
                 n_ch += 1
                 # az EPG display-name-jei a csatorna-felderítés slug-jelöltjei
@@ -1054,11 +1084,15 @@ class App:
             if el.tag == "channel":
                 gn = chno_by_tvg.get(el.get("id"))
                 if gn:
-                    # a katalógus-néves display-name az ELSŐ helyre kerül: a Plex az elsőt
-                    # használja állomásnévként (a forráséban minőségi/24/7 utótag szokott lenni)
-                    dn = ET.Element("display-name")
-                    dn.text = (f"{gn} {name_by_chno.get(gn) or (el.findtext('display-name') or '').strip()}").strip()
-                    el.insert(0, dn)
+                    # ELSŐ display-name = tiszta katalógusnév: a Plex akkor párosít automatikusan,
+                    # ha az állomásnév pontosan egyezik a tuner-csatorna nevével (GuideName).
+                    # MÁSODIK = „<szám> <név>”: a normál EPG guide-ként való használatához kell
+                    # (a forrásnévben minőségi/24/7 utótag szokott lenni).
+                    cat_name = name_by_chno.get(gn) or (el.findtext("display-name") or "").strip()
+                    dn1 = ET.Element("display-name"); dn1.text = cat_name
+                    el.insert(0, dn1)
+                    dn2 = ET.Element("display-name"); dn2.text = f"{gn} {cat_name}"
+                    el.insert(1, dn2)
         # HDHomeRun/Plex EPG: a csatorna-id a katalógus chno-ja, hogy a Plex a tuner lineupjával párosítani tudja
         hmap = {c.get("tvg_id"): str(c["chno"]) for c in chans
                 if c.get("tvg_id") and c.get("chno") and c.get("enabled") is not False}
